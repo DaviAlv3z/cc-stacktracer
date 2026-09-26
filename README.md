@@ -81,7 +81,8 @@ Subpath exports, all optional — install only the peer dependency you actually 
 | --- | --- |
 | `cc-stacktracer/fastify` | Fastify plugin: HTTP spans, route templates, trace context |
 | `cc-stacktracer/express` | Express middleware |
-| `cc-stacktracer/adonis` | AdonisJS integration |
+| `cc-stacktracer/adonis/middleware` | AdonisJS 6/7 server middleware (`server.use`) — see the [Adonis guide](./docs/guides/integration-adonis.en-US.md) |
+| `cc-stacktracer/adonis` | AdonisJS route middleware and types |
 | `cc-stacktracer/db-prisma` | Prisma query instrumentation |
 | `cc-stacktracer/db-lucid` | Lucid (AdonisJS) query instrumentation |
 | `cc-stacktracer/generic-http` | Any other HTTP framework |
@@ -143,6 +144,7 @@ Using Cursor? Copy `node_modules/cc-stacktracer/cursor-rules/*.mdc` into your pr
 | `log(message, metadata?)` | Simple log |
 | `logStructured({ level, message, attributes })` | Structured log |
 | `captureException(error, context?)` | Error event for an error you handle yourself (the rest are automatic) |
+| `recordRequestError(error)` | In a framework error handler the integration cannot see (AdonisJS `report()`): one event only if the response is a 5xx |
 | `runQuery(system, name, fn, options?)` | Timed DB span |
 | `measure(name, fn, options?)` | Timed span for arbitrary work |
 | `withSpan(name, fn, options?)` | Manual span |

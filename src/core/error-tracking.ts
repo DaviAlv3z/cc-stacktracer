@@ -222,15 +222,41 @@ export function recordSpanError(params: {
 /**
  * A excecao vista na borda HTTP, antes de o status existir. Guardada mesmo com o Error Tracking desligado:
  * o span raiz ainda precisa dela para `error_type`/`error_message` em 5xx. Fica a primeira: e a que escapou.
+ *
+ * Devolve `false` quando nao ha raiz aberta para guardar — fora de requisicao, ou depois de a resposta
+ * fechar. Guardar numa raiz ja fechada so ocupava memoria ate o TTL: ninguem mais le a borda dela.
  */
-export function recordBoundaryError(error: unknown, root?: { traceId: string; rootSpanId: string }): void {
-  safeRun('errorTracking.boundary', () => {
-    const target = root ?? currentRoot();
-    if (target === undefined || !(error instanceof Error)) return;
-    const entry = pendingRoot(rootKey(target.traceId, target.rootSpanId));
-    if (entry.boundary === undefined) {
-      entry.boundary = { error, context: mergeEventContext(), occurredAt: new Date().toISOString() };
-    }
+export function recordBoundaryError(error: unknown, root?: { traceId: string; rootSpanId: string }): boolean {
+  return (
+    safeRun('errorTracking.boundary', () => {
+      const target = root ?? currentRoot();
+      if (target === undefined || !(error instanceof Error)) return false;
+      const key = rootKey(target.traceId, target.rootSpanId);
+      if (closed.has(key)) return false;
+      const entry = pendingRoot(key);
+      if (entry.boundary === undefined) {
+        entry.boundary = { error, context: mergeEventContext(), occurredAt: new Date().toISOString() };
+      }
+      return true;
+    }) === true
+  );
+}
+
+/**
+ * API publica de {@link recordBoundaryError}, para o error handler do framework.
+ *
+ * No Adonis (e em todo framework cujo error handler roda DENTRO do `next()`) a excecao nunca chega ao
+ * middleware do SDK: o handler a trata e o `next()` resolve normalmente. Sem esta chamada o 5xx saia sem
+ * evento e o span raiz sem `error_type`/`error_message`.
+ *
+ * Dentro de uma requisicao, a resposta decide: status de erro de servidor vira UM evento, com o status
+ * final, e o span raiz leva a excecao; 4xx nao vira nada. Segue o Error Tracking, como a captura das outras
+ * integracoes. Fora de requisicao nao ha status para esperar, e o erro sai na hora, como `captureException`.
+ */
+export function recordRequestError(error: unknown): void {
+  safeRun('recordRequestError', () => {
+    if (!(error instanceof Error)) return;
+    if (!recordBoundaryError(error)) captureErrorOnce(error);
   });
 }
 

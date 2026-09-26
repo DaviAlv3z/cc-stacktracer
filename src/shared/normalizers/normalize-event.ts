@@ -227,6 +227,26 @@ function performanceTags(raw: unknown): Record<string, string> {
   return out;
 }
 
+/**
+ * Do bloco `resource` que o SDK anexa, o que identifica a INSTANCIA: com varias replicas, e o que diz qual
+ * delas falhou. O contrato nao tem campo para isso (o `ResourceSchema` e outra coisa), entao vai como tag,
+ * com o nome do OpenTelemetry. Ate a 3.1 o bloco inteiro era descartado aqui.
+ */
+const RESOURCE_TAG_KEYS = ['host.name', 'process.pid'] as const;
+
+function resourceTags(raw: unknown): Record<string, string> {
+  if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) return {};
+  const resource = raw as Record<string, unknown>;
+  const out: Record<string, string> = {};
+  for (const key of RESOURCE_TAG_KEYS) {
+    const v = resource[key];
+    if (typeof v !== 'string' && typeof v !== 'number') continue;
+    const safe = toTagValue(key, String(v));
+    if (safe !== undefined) out[key] = safe;
+  }
+  return out;
+}
+
 /** `runtime` do SDK (`node`, `platform`, `arch`) no formato do `RuntimeSchema` do contrato. */
 function runtimeBlock(raw: unknown): z.infer<typeof MetadataSchema>['runtime'] | undefined {
   if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) return undefined;
@@ -280,7 +300,7 @@ function structureMetadataFromV1Event(
     // Blocos que o PROPRIO SDK anexa (attachCommonContext). Sem estar aqui eles caiam no ramo de objeto
     // desconhecido: descartados E avisados via `onDroppedContextKey` — dois warnings por evento.
     // `release` ja viaja como `service.version`; `resource` (OTel) nao cabe no `ResourceSchema` do
-    // contrato e so interessa ao transporte customizado.
+    // contrato: dele, so host e pid saem, como tag (`resourceTags`).
     'runtime',
     'resource',
     'release',
@@ -303,6 +323,7 @@ function structureMetadataFromV1Event(
   const mergedTags: Record<string, string> = {
     ...metaTags,
     ...performanceTags(meta.performance),
+    ...resourceTags(meta.resource),
     ...sanitizeTags(event.tags ?? {}),
   };
 

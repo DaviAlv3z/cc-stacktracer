@@ -6,10 +6,11 @@ import type { StackTraceClient } from '../core/stacktrace-client.js';
 import { getStackTraceClient } from '../index.js';
 import { runWithTraceContext } from '../core/trace-span-context.js';
 import { extractCorrelationFromHeaders } from '../utils/correlation.js';
-import { maskDynamicRouteSegments, normalizeHttpRouteForSpan } from '../shared/schema/index.js';
+import { headersToRecord } from '../utils/headers.js';
 import { redactHeaders } from '../utils/redact-headers.js';
 import { redactUrl } from '../utils/redact-url.js';
 import { httpRootSpanOutcome } from './http-root-span-outcome.js';
+import { httpRootSpanRoute } from './http-root-span-route.js';
 import { completeLocalRoot, recordBoundaryError } from '../core/error-tracking.js';
 import { warnRemovedCaptureErrors } from './removed-options.js';
 
@@ -23,20 +24,29 @@ export type StacktraceAdonisOptions = {
   emitHttpRootSpan?: boolean;
 };
 
+/** A resposta crua do Node (`ServerResponse`): o status final e os eventos `finish`/`close`. */
+export type AdonisRawResponseLike = { statusCode: number; on?(event: string, cb: () => void): void };
+
 /**
- * Minimal shape compatible with AdonisJS v6 HttpContext for request/response capture.
+ * O pedaco do `HttpContext` do Adonis 6/7 que a integracao le. O `HttpContext` real e atribuivel a este tipo.
  */
 export type AdonisHttpContextLike = {
   request: {
     method(): string;
-    url(): string;
-    headers(): Record<string, string>;
+    url(includeQueryString?: boolean): string;
+    headers(): Record<string, string | string[] | undefined>;
     ip?(): string;
     header?(name: string): string | undefined;
     protocol?(): string;
   };
   response: {
-    getResponse(): { statusCode: number; on?(event: string, cb: () => void): void };
+    /** Adonis 6/7: `ctx.response.response` e a resposta crua do Node. */
+    response?: AdonisRawResponseLike;
+    /**
+     * @deprecated Nao existe no Adonis — a integracao ate a 3.1 chamava este metodo e, num app real, nao
+     * emitia nada. Continua aceito para quem adaptava o contexto.
+     */
+    getResponse?(): AdonisRawResponseLike;
   };
   route?: { pattern?: string };
 };
@@ -52,15 +62,22 @@ type RequestTelemetry = {
   rootSpanId: string;
   parentSpanId: string | undefined;
   traceFlags: string | undefined;
-  raw: ReturnType<AdonisHttpContextLike['response']['getResponse']>;
+  raw: AdonisRawResponseLike;
   emit: (aborted: boolean) => void;
 };
 
 function prepareRequest(ctx: AdonisHttpContextLike, opts: StacktraceAdonisOptions | undefined): RequestTelemetry {
   const start = Date.now();
+  const raw = ctx.response.response ?? ctx.response.getResponse?.();
+  if (raw === undefined) {
+    // Sem a resposta crua nao ha status nem fim de requisicao. Lanca com a causa, que chega ao `logger` ou ao
+    // `debug` como falha interna, em vez de um TypeError generico: foi assim que a integracao passou a 3.x
+    // inteira sem emitir nada, e sem ninguem saber por que.
+    throw new Error('cc-stacktracer/adonis: ctx.response.response ausente; o contexto nao parece do Adonis 6/7');
+  }
   const method = ctx.request.method();
-  const url = ctx.request.url();
-  const rawHeaders = ctx.request.headers();
+  const url = ctx.request.url(true);
+  const rawHeaders = headersToRecord(ctx.request.headers());
   const client = getClient(opts);
   const correlation = extractCorrelationFromHeaders(rawHeaders);
   const headers = redactHeaders(rawHeaders, { maxValueLength: 512, ...client?.getHeaderRedactionOptions() });
@@ -73,7 +90,6 @@ function prepareRequest(ctx: AdonisHttpContextLike, opts: StacktraceAdonisOption
       return typeof pattern === 'string' && pattern.trim() !== '' ? pattern : undefined;
     },
   };
-  const raw = ctx.response.getResponse();
   const emitHttpRootSpan = opts?.emitHttpRootSpan !== false;
   const traceId = correlation.traceId ?? randomBytes(16).toString('hex');
   const rootSpanId = randomBytes(8).toString('hex');
@@ -98,9 +114,6 @@ function prepareRequest(ctx: AdonisHttpContextLike, opts: StacktraceAdonisOption
     if (!client) return;
     const durationMs = Date.now() - start;
     snapshot.statusCode = statusCode;
-    // Sem rota casada: path com ids mascarados, nunca cru.
-    const pathOnly = maskDynamicRouteSegments(url.split('?')[0] ?? url);
-    const routePattern = ctx.route?.pattern;
     // Politica de captura: decidida uma vez so, em `enqueueSpan` (ver fastify.ts).
     if (!emitHttpRootSpan) {
       return;
@@ -109,8 +122,8 @@ function prepareRequest(ctx: AdonisHttpContextLike, opts: StacktraceAdonisOption
     /** Use closure ids: `on("finish")` may run outside ALS, so avoid getTraceIdFromContext() here. */
     const startIso = new Date(start).toISOString();
     const endIso = new Date().toISOString();
-    const routeLabel = typeof routePattern === 'string' && routePattern !== '' ? routePattern : pathOnly;
-    const httpRoute = normalizeHttpRouteForSpan(method, routeLabel) ?? routeLabel;
+    // Sem rota casada (404, robo, estatico): o balde `[unmatched]`.
+    const route = httpRootSpanRoute(method, ctx.route?.pattern, url);
     client.enqueueSpan({
       span_timestamp: endIso,
       trace_id: traceId,
@@ -119,14 +132,15 @@ function prepareRequest(ctx: AdonisHttpContextLike, opts: StacktraceAdonisOption
       service_name: client.getServiceDescriptor().name,
       service_version: client.getServiceDescriptor().version,
       environment: client.getEnvironment(),
-      span_name: `${method} ${routeLabel}`.slice(0, 1024),
+      span_name: route.span_name,
       span_type: 'http',
       start_time: startIso,
       end_time: endIso,
       duration_us: Math.max(0, Math.round(durationMs * 1000)),
       ...httpRootSpanOutcome(aborted, statusCode, boundaryError),
       http_method: method,
-      http_route: httpRoute.slice(0, 4096),
+      http_route: route.http_route,
+      ...(route.attributes !== undefined ? { attributes: route.attributes } : {}),
     });
   };
 
@@ -142,9 +156,16 @@ function prepareRequest(ctx: AdonisHttpContextLike, opts: StacktraceAdonisOption
 }
 
 /**
- * AdonisJS v6-style HTTP middleware: (ctx, next). Establishes the same request + trace AsyncLocalStorage
- * scope as the Fastify plugin so {@link withSpan} / span rows correlate, and emits a root HTTP span when
- * {@link StacktraceAdonisOptions.emitHttpRootSpan} is true.
+ * Middleware HTTP do Adonis 6/7 na forma de funcao `(ctx, next)`. Abre o mesmo contexto de requisicao e de
+ * trace das outras integracoes e emite o span raiz quando {@link StacktraceAdonisOptions.emitHttpRootSpan}
+ * e true.
+ *
+ * Para registrar no `server.use` — antes do roteamento, para que 404, sessao e CSRF tenham trace — use a
+ * classe {@link StackTraceAdonisMiddleware} (`cc-stacktracer/adonis/middleware`). A funcao serve para
+ * `router.get(...).use(...)`.
+ *
+ * O exception handler do Adonis trata a excecao DENTRO do `next()`: este middleware nunca a ve. Chame
+ * `StackTrace.recordRequestError(error)` no `report()` do handler.
  *
  * `next()` roda exatamente uma vez e o erro dele sobe intacto; a telemetria em volta nunca lança.
  */
@@ -185,6 +206,22 @@ export function stacktraceAdonisMiddleware(
       ),
     );
   };
+}
+
+/**
+ * O middleware no formato que o `server.use` do Adonis exige: modulo com uma classe `default` que tem
+ * `handle(ctx, next)`. Registre PRIMEIRO, em `start/kernel.ts`:
+ *
+ * ```ts
+ * server.use([() => import('cc-stacktracer/adonis/middleware'), ...])
+ * ```
+ */
+export class StackTraceAdonisMiddleware {
+  private static readonly run = stacktraceAdonisMiddleware();
+
+  handle(ctx: AdonisHttpContextLike, next: () => Promise<void>): Promise<void> {
+    return StackTraceAdonisMiddleware.run(ctx, next);
+  }
 }
 
 /** Registry entry; use `stacktraceAdonisMiddleware()` in the HTTP kernel. */

@@ -11,8 +11,8 @@ import { extractCorrelationFromHeaders } from '../utils/correlation.js';
 import { redactHeaders } from '../utils/redact-headers.js';
 import { headersToRecord } from '../utils/headers.js';
 import { redactUrl } from '../utils/redact-url.js';
-import { maskDynamicRouteSegments, normalizeHttpRouteForSpan } from '../shared/schema/index.js';
 import { httpRootSpanOutcome } from './http-root-span-outcome.js';
+import { httpRootSpanRoute } from './http-root-span-route.js';
 import { completeLocalRoot, recordBoundaryError } from '../core/error-tracking.js';
 import { warnRemovedCaptureErrors } from './removed-options.js';
 
@@ -81,12 +81,10 @@ function emitRootSpan(
   const startMs = req[START_TIME_KEY];
   const endMs = Date.now();
   const durationMs = startMs !== undefined ? endMs - startMs : 0;
-  // Sem rota casada (404, scanner): o path com os ids mascarados. Cru, cada id virava uma rota.
-  const pathOnly = maskDynamicRouteSegments(request.url.split('?')[0] ?? request.url);
+  // Sem rota casada (404, scanner): o balde `[unmatched]`, e nao uma linha de rota por URL de robo.
+  const routeFields = httpRootSpanRoute(request.method, route, request.url);
   const startIso = startMs !== undefined ? new Date(startMs).toISOString() : new Date(endMs - durationMs).toISOString();
   const endIso = new Date(endMs).toISOString();
-  const routeLabel = typeof route === 'string' && route !== '' ? route : pathOnly;
-  const httpRoute = normalizeHttpRouteForSpan(request.method, routeLabel) ?? routeLabel;
 
   client.enqueueSpan({
     span_timestamp: endIso,
@@ -96,14 +94,15 @@ function emitRootSpan(
     service_name: client.getServiceDescriptor().name,
     service_version: client.getServiceDescriptor().version,
     environment: client.getEnvironment(),
-    span_name: `${request.method} ${routeLabel}`.slice(0, 1024),
+    span_name: routeFields.span_name,
     span_type: 'http',
     start_time: startIso,
     end_time: endIso,
     duration_us: Math.max(0, Math.round(durationMs * 1000)),
     ...httpRootSpanOutcome(aborted, reply.statusCode, boundaryError),
     http_method: request.method,
-    http_route: httpRoute.slice(0, 4096),
+    http_route: routeFields.http_route,
+    ...(routeFields.attributes !== undefined ? { attributes: routeFields.attributes } : {}),
   });
 }
 

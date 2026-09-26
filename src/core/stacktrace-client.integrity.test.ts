@@ -1,3 +1,4 @@
+import { hostname } from 'node:os';
 import { afterEach, describe, expect, it } from 'vitest';
 import { captureException, flush, init, log, shutdown, withSpan, withTrace } from '../index.js';
 import { EventSchemaV4 } from '../shared/schema/index.js';
@@ -54,7 +55,11 @@ describe('data integrity on the default transport', () => {
     ]);
     for (const e of sent) expect(EventSchemaV4.safeParse(e).success).toBe(true);
     const bad = sent[1]!;
-    expect((bad.metadata as { tags: Record<string, string> }).tags).toEqual({ big: 'v'.repeat(1_024) });
+    expect((bad.metadata as { tags: Record<string, string> }).tags).toEqual({
+      big: 'v'.repeat(1_024),
+      'host.name': hostname(),
+      'process.pid': String(process.pid),
+    });
   });
 
   it('keeps the same event_id across retries of the same batch', async () => {

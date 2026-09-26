@@ -5,7 +5,7 @@ import { parseStackTraceInit, type ParsedStackTraceInit } from './core/config.sc
 import { buildInternalFailureSink, reportInvalidConfig } from './core/init-diagnostics.js';
 import { isSdkDisabledByEnv } from './core/kill-switch.js';
 import { resolveErrorTrackingConfig } from './core/error-tracking-config.js';
-import { captureErrorOnce } from './core/error-tracking.js';
+import { captureErrorOnce, recordRequestError } from './core/error-tracking.js';
 import type { StackTraceAutoOptions, StackTraceInitOptions } from './core/config.types.js';
 import type { StackTracePlugin } from './core/plugins/types.js';
 import {
@@ -258,6 +258,7 @@ export const StackTrace = {
   loadAutoPlugins,
   hasDependency,
   captureException,
+  recordRequestError,
   log,
   logStructured,
   measure,
@@ -282,6 +283,7 @@ export const StackTrace = {
 };
 
 export { createStackTraceClient, StackTraceClient };
+export { recordRequestError };
 export type { BatchTransportPayload };
 export { IngestTransportError } from './core/transport/ingest-transport-error.js';
 export { registerPlugin as register, usePlugin as use, getPlugins, loadAutoPlugins, hasDependency };

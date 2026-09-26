@@ -1,3 +1,4 @@
+import { hostname } from 'node:os';
 import { afterEach, describe, expect, it } from 'vitest';
 import {
   endHttpRequest,
@@ -58,6 +59,18 @@ describe('SDK payload coherence', () => {
     expect(md.tags).toMatchObject({ 'performance.operation': 'import', 'performance.duration_ms': '42' });
     expect(md.tags!.release).toBeUndefined();
     expect(warns).toEqual([]);
+  });
+
+  it('host.name and process.pid reach the server as tags; the rest of the resource block does not', async () => {
+    const posted = captureFetch();
+    start();
+    log('hi');
+    log('explicit', { tags: { 'host.name': 'pod-a' } } as Record<string, unknown>);
+    await flush();
+    const tagsOf = (i: number) => (posted[0]!.events![i]!.metadata as { tags?: Record<string, string> }).tags ?? {};
+    expect(tagsOf(0)).toMatchObject({ 'host.name': hostname(), 'process.pid': String(process.pid) });
+    expect(Object.keys(tagsOf(0)).filter((k) => k.startsWith('telemetry.') || k.startsWith('service.'))).toEqual([]);
+    expect(tagsOf(1)['host.name']).toBe('pod-a');
   });
 
   it('a child span typed http is an outbound call, not an inbound request', async () => {

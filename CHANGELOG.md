@@ -4,6 +4,59 @@ All notable changes to the `cc-stacktracer` SDK are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.2.0] - 2026-09-26
+
+AdonisJS works for real, the error handler you cannot see through gets an API, and unmatched requests
+stop multiplying routes.
+
+### Fixed
+
+- **The AdonisJS middleware emitted nothing in a real Adonis app.** It called
+  `ctx.response.getResponse()`, which Adonis 6/7 does not have; the failure was swallowed by fail-open and
+  every request went through untraced. It now uses `ctx.response.response`. The tests mocked the context,
+  so they never saw it; the integration is now tested against the real `@adonisjs/http-server`.
+- **The 3.0 upgrade notes and the Adonis rule said the Adonis middleware sees the exception.** It does
+  not: the Adonis exception handler handles it inside `next()`. On 3.0/3.1, keep `captureException` in the
+  handler's `report()` — it is the only source of a 5xx's stack. On 3.2, use `recordRequestError`.
+
+### Added
+
+- **`recordRequestError(error)`** — for a framework error handler the integration cannot see (AdonisJS
+  `report()`). Inside a request, the response decides: a server error status becomes ONE error event,
+  with the final status and the route, and the root span carries `error_type`/`error_message`; a 4xx sends
+  nothing. Outside a request it sends right away, like `captureException`.
+- **`cc-stacktracer/adonis/middleware`** — the middleware in the shape `server.use` requires (a module
+  with a default class). Register it first in `start/kernel.ts`; as server middleware it runs before
+  routing, so 404s, session and CSRF failures are traced too. The class is also exported as
+  `StackTraceAdonisMiddleware` from `cc-stacktracer/adonis`.
+- **`startHttpRequest({ route })` accepts a function**, read when each event is sent and when the root
+  span closes: `route: () => ctx.route?.pattern`. And **`trace.setRoute(pattern)`** sets it after the
+  request opened. Assigning `trace.request.route` now does the same. No more writing to SDK internals to
+  open the request before routing.
+- **`host.name` and `process.pid` reach the dashboard as event tags.** The SDK always collected them, then
+  dropped the whole `resource` block during normalization.
+
+### Changed
+
+- **A request that matched no route is recorded as `[unmatched]`** — Fastify, Express, AdonisJS, and
+  `startHttpRequest` with a `route` function that never matched. Until 3.1 the root span took the masked
+  path, and every bot URL (`/.env`, `/wp-login.php`) or static file became its own route row. The masked
+  path is kept in the span attribute `url.path`. OpenTelemetry and Datadog do the same. Capture rules and
+  alerts on a path that never matched a route now see `[unmatched]`. `startHttpRequest` without any
+  `route` still uses the masked path.
+- `AdonisHttpContextLike` now matches the real Adonis `HttpContext` (headers may be arrays), so
+  `stacktraceAdonisMiddleware()` type-checks in `router.get(...).use(...)`.
+
+### Upgrading from 3.1
+
+1. AdonisJS: replace any custom telemetry middleware with
+   `server.use([() => import('cc-stacktracer/adonis/middleware'), ...])`, and in the exception handler
+   replace `captureException` with `StackTrace.recordRequestError(error)` (keeping both is still one
+   event).
+2. Code that wrote the route into SDK internals: use `route: () => ...` or `trace.setRoute()`.
+3. Tags `resource.host.name` / `resource.process.pid` added by hand can go: `host.name` and
+   `process.pid` now come from the SDK.
+
 ## [3.1.0] - 2026-09-26
 
 Data integrity: what the SDK sends is what the dashboard shows — once, whole, in the right place.
@@ -100,6 +153,8 @@ server error status, and each request or job reports one error — the top-most 
    arguments. Express still needs that middleware after the routes: it is the only way to see the
    exception.
 2. A `captureException` in your error handler can stay — it will not double-count — or go.
+   **Correction (3.2.0): not in AdonisJS** — its exception handler runs inside `next()`, where no
+   middleware sees the exception. There, keep it (3.0/3.1) or use `recordRequestError` (3.2+).
 3. Keep `captureException` for errors you catch and handle yourself: those are not captured
    automatically (Datadog does not capture them in Node either).
 4. **Differences from Datadog, on purpose:** outbound calls default to `500-599` instead of Datadog's

@@ -1,3 +1,4 @@
+import { hostname } from 'node:os';
 import { createHash, createHmac } from 'node:crypto';
 import { describe, expect, it, vi, afterEach } from 'vitest';
 import { parseStackTraceInit } from './config.schema.js';
@@ -193,7 +194,8 @@ describe('StackTraceClient', () => {
     );
     const init = fetchMock.mock.calls[0]?.[1] as RequestInit;
     const body = JSON.parse(init?.body as string) as { events: Array<{ metadata?: { tags?: unknown } }> };
-    expect(body.events[0]?.metadata?.tags).toBeUndefined();
+    // O objeto descartado nao vira tag: so as tags de instancia que o SDK sempre manda.
+    expect(body.events[0]?.metadata?.tags).toEqual({ 'host.name': hostname(), 'process.pid': String(process.pid) });
     await client.shutdown();
   });
 

@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { getStackTraceClient, init, shutdown } from '../index.js';
+import { getStackTraceClient, init, log, shutdown } from '../index.js';
 import { resetFailOpenState } from '../core/safe-run.js';
 import { StackTraceHttpRequest, startHttpRequest } from './index.js';
 import type { BatchTransportPayload } from '../core/stacktrace-client.js';
@@ -177,5 +177,120 @@ describe('generic-http Error Tracking (3.0)', () => {
     await vi.waitFor(() => expect(payloads(transport).some((p) => p.kind === 'batch')).toBe(true));
     const events = payloads(transport).flatMap((p) => (p.kind === 'batch' ? p.events : []));
     expect(events.map((e) => e.message)).toEqual(['dependencia fora']);
+  });
+});
+
+describe('generic-http: rota conhecida so depois do roteamento (3.2)', () => {
+  afterEach(async () => {
+    await shutdown();
+    resetFailOpenState();
+  });
+
+  function initWith(): ReturnType<typeof vi.fn> {
+    const transport = vi.fn().mockResolvedValue(undefined);
+    init({
+      apiKey: 'k',
+      serviceId: '11111111-1111-4111-8111-111111111111',
+      endpoint: 'https://ingest.example.com',
+      sendMode: 'immediate',
+      transport,
+    });
+    return transport;
+  }
+
+  const payloads = (transport: ReturnType<typeof vi.fn>): BatchTransportPayload[] =>
+    transport.mock.calls.map((c) => c[0] as BatchTransportPayload);
+
+  async function sent(transport: ReturnType<typeof vi.fn>) {
+    await vi.waitFor(() => expect(payloads(transport).some((p) => p.kind === 'spans')).toBe(true));
+    const root = payloads(transport).find((p) => p.kind === 'spans')!.spans[0]!;
+    const routes = payloads(transport)
+      .flatMap((p) => (p.kind === 'batch' ? p.events : []))
+      .map((e) => (e.context?.http as { route_template?: string } | undefined)?.route_template);
+    return { root, routes };
+  }
+
+  it('route como funcao: o evento antes do match fica sem template, os de depois e o span levam o pattern', async () => {
+    const transport = initWith();
+    const ctx: { route?: { pattern: string } } = {};
+    const trace = startHttpRequest({ method: 'GET', url: '/users/42', route: () => ctx.route?.pattern });
+    await trace.run(async () => {
+      log('antes do roteamento');
+      ctx.route = { pattern: '/users/:userId' };
+      log('depois do roteamento');
+    });
+    trace.end({ statusCode: 200 });
+
+    const { root, routes } = await sent(transport);
+    expect(routes).toEqual([undefined, '/users/:userId']);
+    expect(root).toMatchObject({ http_route: '/users/:userId', span_name: 'GET /users/:userId' });
+  });
+
+  it('setRoute: vale para os eventos seguintes e para o span raiz', async () => {
+    const transport = initWith();
+    const trace = startHttpRequest({ method: 'POST', url: '/orders/7/items' });
+    await trace.run(async () => {
+      trace.setRoute('/orders/:orderId/items');
+      log('dentro');
+    });
+    trace.end({ statusCode: 201 });
+
+    const { root, routes } = await sent(transport);
+    expect(routes).toEqual(['/orders/:orderId/items']);
+    expect(root.http_route).toBe('/orders/:orderId/items');
+    expect(trace.request.route).toBe('/orders/:orderId/items');
+  });
+
+  it('atribuir trace.request.route continua funcionando, agora como setRoute', async () => {
+    const transport = initWith();
+    const trace = startHttpRequest({ method: 'GET', url: '/a/1' });
+    await trace.run(async () => {
+      trace.request.route = '/a/:id';
+      log('dentro');
+    });
+    trace.end({ statusCode: 200 });
+
+    const { root, routes } = await sent(transport);
+    expect(routes).toEqual(['/a/:id']);
+    expect(root.http_route).toBe('/a/:id');
+  });
+
+  it('funcao de rota que lanca nao derruba a requisicao nem o evento', async () => {
+    const transport = initWith();
+    const trace = startHttpRequest({
+      method: 'GET',
+      url: '/x/9',
+      route: () => {
+        throw new Error('bug do app');
+      },
+    });
+    await trace.run(async () => log('dentro'));
+    trace.end({ statusCode: 200 });
+
+    const { routes } = await sent(transport);
+    expect(routes).toEqual([undefined]);
+  });
+
+  it('route como funcao que nao casou ate o fim: o balde [unmatched], com o path em url.path', async () => {
+    const transport = initWith();
+    const ctx: { route?: { pattern: string } } = {};
+    const trace = startHttpRequest({ method: 'GET', url: '/.env', route: () => ctx.route?.pattern });
+    await trace.run(async () => undefined);
+    expect(trace.request.route).toBe('[unmatched]');
+    trace.end({ statusCode: 404 });
+
+    const { root } = await sent(transport);
+    expect(root).toMatchObject({ http_route: '[unmatched]', span_name: 'GET [unmatched]' });
+    expect(root.attributes).toEqual({ 'url.path': '/.env' });
+  });
+
+  it('sem route nenhum o span continua com o path mascarado', async () => {
+    const transport = initWith();
+    const trace = startHttpRequest({ method: 'GET', url: '/clientes/123?x=1' });
+    await trace.run(async () => undefined);
+    trace.end({ statusCode: 200 });
+
+    const { root } = await sent(transport);
+    expect(root.http_route).toBe('/clientes/:id');
   });
 });

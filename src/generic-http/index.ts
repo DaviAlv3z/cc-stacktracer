@@ -4,8 +4,9 @@ import { runWithRequestContext, type HttpRequestSnapshot } from '../core/request
 import { runWithTraceContext } from '../core/trace-span-context.js';
 import { completeLocalRoot, recordBoundaryError } from '../core/error-tracking.js';
 import { httpRootSpanOutcome } from '../integrations/http-root-span-outcome.js';
+import { httpRootSpanRoute, UNMATCHED_HTTP_ROUTE } from '../integrations/http-root-span-route.js';
 import { isTelemetryActive, safeRun } from '../core/safe-run.js';
-import { maskDynamicRouteSegments, normalizeHttpRouteForSpan } from '../shared/schema/index.js';
+import { maskDynamicRouteSegments } from '../shared/schema/index.js';
 import { extractCorrelationFromHeaders } from '../utils/correlation.js';
 import { headersToRecord } from '../utils/headers.js';
 import { redactHeaders } from '../utils/redact-headers.js';
@@ -14,7 +15,13 @@ import { redactUrl } from '../utils/redact-url.js';
 export type StackTraceHttpRequestInput = {
   method: string;
   url: string;
-  route?: string;
+  /**
+   * Template da rota (`/users/:id`). Aceita uma funcao, lida quando cada evento sai e quando o span raiz
+   * fecha: quem abre a requisicao ANTES do roteamento (para que falhas de sessao ou CSRF tenham trace)
+   * passa `() => ctx.route?.pattern`. Funcao que ainda devolve `undefined` no fim da requisicao quer dizer
+   * que nenhuma rota casou. Sem `route`, o span usa o path com os ids mascarados.
+   */
+  route?: string | (() => string | undefined);
   headers?: Record<string, string | string[] | undefined>;
   startTime?: number;
   requestId?: string;
@@ -30,9 +37,16 @@ export type StackTraceHttpResponseInput = {
 export type StackTraceHttpRequestSnapshot = {
   method: string;
   url: string;
+  /** A rota que o span raiz vai levar, lida na hora. Atribuir equivale a {@link StackTraceHttpRequest.setRoute}. */
   route: string;
   headers: Record<string, string>;
 };
+
+type RouteSource = string | (() => string | undefined);
+
+function nonEmptyRoute(value: unknown): string | undefined {
+  return typeof value === 'string' && value.trim() !== '' ? value : undefined;
+}
 
 /** Path sem query e com os ids mascarados — a rota de quem nao informou . */
 function pathOnly(url: string): string {
@@ -58,6 +72,10 @@ export class StackTraceHttpRequest {
 
   private readonly startTime: number;
   private readonly snapshot: HttpRequestSnapshot;
+  private readonly routeSource: RouteSource | undefined;
+  /** Path com os ids mascarados: a rota de quem nao informou `route` nenhum. */
+  private readonly fallbackRoute: string;
+  private routeOverride: string | undefined;
   /** Sem telemetria (kill switch, fusível ou setup que falhou): `run` só executa e `end` não faz nada. */
   private readonly inert: boolean;
   private ended = false;
@@ -68,7 +86,9 @@ export class StackTraceHttpRequest {
     remoteParentSpanId?: string;
     traceFlags?: string;
     startTime: number;
-    request: StackTraceHttpRequestSnapshot;
+    request: Omit<StackTraceHttpRequestSnapshot, 'route'>;
+    routeSource: RouteSource | undefined;
+    fallbackRoute: string;
     snapshot: HttpRequestSnapshot;
     inert: boolean;
   }) {
@@ -81,9 +101,47 @@ export class StackTraceHttpRequest {
       this.traceFlags = params.traceFlags;
     }
     this.startTime = params.startTime;
-    this.request = params.request;
+    this.routeSource = params.routeSource;
+    this.fallbackRoute = params.fallbackRoute;
     this.snapshot = params.snapshot;
     this.inert = params.inert;
+    // Getter, e nao valor copiado: a rota pode chegar depois do roteamento (funcao ou `setRoute`).
+    const request = { ...params.request } as StackTraceHttpRequestSnapshot;
+    Object.defineProperty(request, 'route', {
+      enumerable: true,
+      get: () => (this.inert ? '' : (this.rootRoute() ?? UNMATCHED_HTTP_ROUTE)),
+      set: (value: string) => this.setRoute(value),
+    });
+    this.request = request;
+    if (!this.inert) {
+      this.snapshot.route = () => this.matchedRoute();
+    }
+  }
+
+  /**
+   * Informa a rota depois de a requisicao abrir — quando o template so existe depois do roteamento. Vale
+   * para os eventos emitidos dali em diante e para o span raiz. Vazio e ignorado.
+   */
+  setRoute(route: string): void {
+    if (this.inert) return;
+    const value = nonEmptyRoute(route);
+    if (value !== undefined) this.routeOverride = value;
+  }
+
+  /** A rota casada, se ja existe. A funcao e do app: se ela lancar, a requisicao segue sem rota. */
+  private matchedRoute(): string | undefined {
+    if (this.routeOverride !== undefined) return this.routeOverride;
+    const source = this.routeSource;
+    if (typeof source !== 'function') return nonEmptyRoute(source);
+    return nonEmptyRoute(safeRun('genericHttp.route', () => source()));
+  }
+
+  /**
+   * A rota do span raiz. Sem `route` nenhum, o path mascarado: o SDK nao conhece o roteador de quem nao
+   * informa rota. Com `route` informado e nada casado, `undefined` — o balde `[unmatched]`.
+   */
+  private rootRoute(): string | undefined {
+    return this.matchedRoute() ?? (this.routeSource === undefined ? this.fallbackRoute : undefined);
   }
 
   static start(input: StackTraceHttpRequestInput): StackTraceHttpRequest {
@@ -105,13 +163,7 @@ export class StackTraceHttpRequest {
       ...client?.getHeaderRedactionOptions(),
     });
     const url = redactUrl(input.url, client?.getUrlRedactionOptions());
-    const route = input.route !== undefined && input.route.trim() !== '' ? input.route : pathOnly(url);
-    const snapshot: HttpRequestSnapshot = {
-      method: input.method,
-      url,
-      headers,
-      ...(input.route !== undefined && input.route.trim() !== '' ? { route: input.route } : {}),
-    };
+    const snapshot: HttpRequestSnapshot = { method: input.method, url, headers };
 
     return new StackTraceHttpRequest({
       traceId,
@@ -119,12 +171,9 @@ export class StackTraceHttpRequest {
       ...(correlation.parentSpanId !== undefined ? { remoteParentSpanId: correlation.parentSpanId } : {}),
       ...(correlation.traceFlags !== undefined ? { traceFlags: correlation.traceFlags } : {}),
       startTime: input.startTime ?? Date.now(),
-      request: {
-        method: input.method,
-        url,
-        route,
-        headers,
-      },
+      request: { method: input.method, url, headers },
+      routeSource: typeof input.route === 'function' ? input.route : nonEmptyRoute(input.route),
+      fallbackRoute: pathOnly(url),
       snapshot,
       inert: false,
     });
@@ -136,7 +185,9 @@ export class StackTraceHttpRequest {
       traceId: randomBytes(16).toString('hex'),
       rootSpanId: randomBytes(8).toString('hex'),
       startTime: Date.now(),
-      request: { method, url: '', route: '', headers: {} },
+      request: { method, url: '', headers: {} },
+      routeSource: undefined,
+      fallbackRoute: '',
       snapshot: { method, url: '', headers: {} },
       inert: true,
     });
@@ -194,7 +245,7 @@ export class StackTraceHttpRequest {
     const startIso = new Date(this.startTime).toISOString();
     const endIso = new Date(endMs).toISOString();
 
-    const httpRoute = normalizeHttpRouteForSpan(this.request.method, this.request.route) ?? this.request.route;
+    const route = httpRootSpanRoute(this.request.method, this.rootRoute(), this.request.url);
     const outcome = httpRootSpanOutcome(false, response.statusCode, boundaryError);
     client.enqueueSpan({
       span_timestamp: endIso,
@@ -204,17 +255,18 @@ export class StackTraceHttpRequest {
       service_name: client.getServiceDescriptor().name,
       service_version: client.getServiceDescriptor().version,
       environment: client.getEnvironment(),
-      span_name: `${this.request.method} ${this.request.route}`.slice(0, 1024),
+      span_name: route.span_name,
       span_type: 'http',
       start_time: startIso,
       end_time: endIso,
       duration_us: Math.max(0, Math.round(durationMs * 1000)),
       status: outcome.status,
       http_method: this.request.method,
-      http_route: httpRoute.slice(0, 4096),
+      http_route: route.http_route,
       http_status_code: response.statusCode,
       error_type: outcome.error_type,
       error_message: outcome.error_message,
+      ...(route.attributes !== undefined ? { attributes: route.attributes } : {}),
     });
   }
 }

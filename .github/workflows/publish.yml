@@ -89,6 +89,9 @@ jobs:
               // Sem isto o pipeline passaria verde ate o primeiro cliente rodar o comando do bin.
               // (Nada de crase aqui: o script vive dentro de node -e ''...'' e o shell as executaria.)
               'dist/cli/index.js',
+              // O subpath que o server.use do Adonis importa, e o guia que o README aponta.
+              'dist/integrations/adonis-middleware.js',
+              'docs/guides/integration-adonis.en-US.md',
             ];
             const missing = required.filter(r => !files.includes(r));
             if (missing.length) {

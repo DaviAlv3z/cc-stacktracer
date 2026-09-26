@@ -9,8 +9,8 @@ import { extractCorrelationFromHeaders } from '../utils/correlation.js';
 import { redactHeaders } from '../utils/redact-headers.js';
 import { headersToRecord } from '../utils/headers.js';
 import { redactUrl } from '../utils/redact-url.js';
-import { maskDynamicRouteSegments, normalizeHttpRouteForSpan } from '../shared/schema/index.js';
 import { httpRootSpanOutcome } from './http-root-span-outcome.js';
+import { httpRootSpanRoute } from './http-root-span-route.js';
 import { completeLocalRoot, recordBoundaryError } from '../core/error-tracking.js';
 import { warnRemovedCaptureErrors } from './removed-options.js';
 
@@ -56,8 +56,7 @@ function prepareRequest(req: Request, res: Response, client: StackTraceClient | 
   };
   const traceId = correlation.traceId ?? randomBytes(16).toString('hex');
   const rootSpanId = randomBytes(8).toString('hex');
-  // Sem rota casada (401 de middleware global, 404): path com ids mascarados, nunca cru.
-  const pathOnly = maskDynamicRouteSegments((req.originalUrl ?? req.url).split('?')[0] ?? req.url);
+  const requestUrl = req.originalUrl ?? req.url;
 
   // Emit the root span exactly once, however the request ends. `finish` covers a
   // completed response; `close` is the fallback for aborted/timed-out connections
@@ -80,9 +79,8 @@ function prepareRequest(req: Request, res: Response, client: StackTraceClient | 
     const endMs = Date.now();
     const durationMs = endMs - start;
     const endIso = new Date(endMs).toISOString();
-    const route = expressMatchedRoute(req);
-    const routeForSpan = typeof route === 'string' && route !== '' ? route : pathOnly;
-    const httpRoute = normalizeHttpRouteForSpan(req.method, routeForSpan) ?? routeForSpan;
+    // Sem rota casada (401 de middleware global, 404, estatico): o balde `[unmatched]`.
+    const route = httpRootSpanRoute(req.method, expressMatchedRoute(req), requestUrl);
     client.enqueueSpan({
       span_timestamp: endIso,
       trace_id: traceId,
@@ -91,14 +89,15 @@ function prepareRequest(req: Request, res: Response, client: StackTraceClient | 
       service_name: client.getServiceDescriptor().name,
       service_version: client.getServiceDescriptor().version,
       environment: client.getEnvironment(),
-      span_name: `${req.method} ${routeForSpan}`.slice(0, 1024),
+      span_name: route.span_name,
       span_type: 'http',
       start_time: startIso,
       end_time: endIso,
       duration_us: Math.max(0, Math.round(durationMs * 1000)),
       ...httpRootSpanOutcome(aborted, res.statusCode, boundaryError),
       http_method: req.method,
-      http_route: httpRoute.slice(0, 4096),
+      http_route: route.http_route,
+      ...(route.attributes !== undefined ? { attributes: route.attributes } : {}),
     });
   };
 

@@ -1,7 +1,7 @@
 ---
 alwaysApply: false
-version: 0.4.4
-lastUpdated: 2026-04-30
+version: 0.4.5
+lastUpdated: 2026-09-26
 ruleset: cc-stacktracer-core
 ---
 
@@ -786,7 +786,11 @@ Recommended pattern:
 
 1. Domain/repository code throws real errors.
 2. Framework error handler maps user-facing responses — the status decides (5xx is an error, 4xx is not).
-3. The SDK sends the error event; no `captureException` is required for it.
+3. The SDK sends the error event; no `captureException` is required for it — WHEN the integration sees
+   the exception (Fastify, Express with `stacktraceErrorMiddleware()` after the routes, generic-http
+   `run()`). When the framework's error handler runs INSIDE the middleware's `next()` — AdonisJS is the
+   common case — no middleware sees it: call `StackTrace.recordRequestError(error)` in the handler
+   (SDK 3.2+). It sends the event only if the response is a server error, with the final status.
 4. To add sanitized diagnostic context, the handler may call `StackTrace.captureException(error, context)`
    with the same error object — still one event.
 5. Errors the application catches and handles without rethrowing are not captured automatically:

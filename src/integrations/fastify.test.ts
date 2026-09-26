@@ -175,6 +175,34 @@ describe('Fastify plugin', () => {
     await app.close();
   });
 
+  it('sem rota casada (404 de robo): o balde [unmatched], com o path mascarado em url.path', async () => {
+    const transport = vi.fn().mockResolvedValue(undefined);
+    const client = createStackTraceClient({
+      apiKey: 'k',
+      serviceId,
+      service: 'svc',
+      environment: 'test',
+      endpoint: 'https://ingest.example.com',
+      sendMode: 'immediate',
+      transport,
+    });
+    const app = Fastify();
+    await app.register(stacktracePlugin, { client });
+    app.get('/callback', async () => ({ ok: true }));
+
+    for (const url of ['/wp-login.php', '/.env', '/api/users/123/avatar?token=x']) {
+      expect((await app.inject({ method: 'GET', url })).statusCode).toBe(404);
+    }
+
+    await vi.waitFor(() => expect(sentPayloads(transport).filter((p) => p.kind === 'spans')).toHaveLength(3));
+    const spans = sentPayloads(transport).flatMap((p) => (p.kind === 'spans' ? p.spans : []));
+    expect(new Set(spans.map((s) => s.http_route))).toEqual(new Set(['[unmatched]']));
+    expect(spans.map((s) => s.span_name)).toEqual(['GET [unmatched]', 'GET [unmatched]', 'GET [unmatched]']);
+    expect(spans.map((s) => s.attributes?.['url.path'])).toEqual(['/wp-login.php', '/.env', '/api/users/:id/avatar']);
+
+    await app.close();
+  });
+
   function initWith(transport: ReturnType<typeof vi.fn>): void {
     init({
       apiKey: 'k',

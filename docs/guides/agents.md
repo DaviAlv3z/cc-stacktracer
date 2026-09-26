@@ -58,6 +58,11 @@ await StackTrace.auto({
 });
 ```
 
+**AdonisJS** (SDK 3.2+): register `cc-stacktracer/adonis/middleware` first in `server.use`, and call
+`StackTrace.recordRequestError(error)` in the exception handler's `report()`. The Adonis handler runs
+inside `next()`, where no middleware sees the exception — without that call a 5xx has no error event.
+See `docs/guides/integration-adonis.en-US.md`.
+
 ## 5. Database instrumentation, per stack
 
 | Stack         | How                                                                                        |

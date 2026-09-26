@@ -1,6 +1,6 @@
 {
   "name": "cc-stacktracer",
-  "version": "3.1.0",
+  "version": "3.2.0",
   "description": "Observability SDK for Node.js — captures errors, structured logs, distributed traces and database spans, and ships them to a CC StackTracer ingestion API.",
   "license": "MIT",
   "type": "module",
@@ -29,6 +29,8 @@
     "docs/client-distributed-tracing.md",
     "docs/guides/agents.md",
     "docs/guides/subtenant.md",
+    "docs/guides/integration-adonis.md",
+    "docs/guides/integration-adonis.en-US.md",
     "cursor-rules"
   ],
   "exports": {
@@ -51,6 +53,11 @@
       "types": "./dist/integrations/adonis.d.ts",
       "import": "./dist/integrations/adonis.js",
       "default": "./dist/integrations/adonis.js"
+    },
+    "./adonis/middleware": {
+      "types": "./dist/integrations/adonis-middleware.d.ts",
+      "import": "./dist/integrations/adonis-middleware.js",
+      "default": "./dist/integrations/adonis-middleware.js"
     },
     "./generic-http": {
       "types": "./dist/generic-http/index.d.ts",
@@ -138,6 +145,7 @@
     }
   },
   "devDependencies": {
+    "@adonisjs/core": "^7.5.2",
     "@eslint/js": "^10.0.1",
     "@types/express": "^5.0.6",
     "@types/node": "^22.10.0",

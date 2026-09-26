@@ -144,6 +144,37 @@ describe('Express middleware', () => {
     expect(span?.http_route).toBe('/callback');
     expect(span?.http_route).not.toContain('secret');
   });
+
+  it('sem rota casada (404, middleware que responde antes do router): o balde [unmatched]', async () => {
+    const transport = vi.fn().mockResolvedValue(undefined);
+    const client = createStackTraceClient({
+      apiKey: 'k',
+      serviceId,
+      service: 'svc',
+      environment: 'test',
+      endpoint: 'https://ingest.example.com',
+      sendMode: 'immediate',
+      transport,
+    });
+    const app = express();
+    app.use(stacktraceExpressMiddleware({ client }));
+    app.use('/private', (_req, res) => {
+      res.status(401).end();
+    });
+    app.get('/users/:id', (_req, res) => res.status(200).end());
+
+    expect((await request(app).get('/wp-login.php')).status).toBe(404);
+    expect((await request(app).get('/private/orders/77')).status).toBe(401);
+    expect((await request(app).get('/users/9')).status).toBe(200);
+
+    await vi.waitFor(() => expect(sentPayloads(transport).filter((p) => p.kind === 'spans')).toHaveLength(3));
+    const spans = sentPayloads(transport).flatMap((p) => (p.kind === 'spans' ? p.spans : []));
+    expect(spans.map((s) => [s.http_route, s.attributes?.['url.path'] ?? null])).toEqual([
+      ['[unmatched]', '/wp-login.php'],
+      ['[unmatched]', '/private/orders/:id'],
+      ['/users/:id', null],
+    ]);
+  });
 });
 
 describe('Express middleware fail-open', () => {

@@ -1,7 +1,7 @@
 ---
 alwaysApply: false
-version: 0.4.1
-lastUpdated: 2026-04-29
+version: 0.5.0
+lastUpdated: 2026-09-26
 ruleset: cc-stacktracer-adonis-lucid
 extends: cc-stacktracer-core.mdc
 ---
@@ -20,8 +20,8 @@ Recommended order:
 2. Initialize app/server lifecycle.
 3. Register correlation middleware before request telemetry.
 4. Initialize `StackTrace.init(...)` or `StackTrace.auto(...)`.
-5. Register Adonis HTTP telemetry middleware/hooks.
-6. Register centralized exception capture.
+5. Register the SDK HTTP middleware FIRST in `server.use` (see §4).
+6. Call `StackTrace.recordRequestError(error)` in the exception handler `report()` (see §8).
 7. Create/instrument Lucid/Database access.
 8. Start serving requests.
 9. Flush telemetry on shutdown.
@@ -75,27 +75,43 @@ It should:
 
 Route label priority:
 
-1. Adonis route pattern/name when available
+1. Adonis route pattern when available
 2. controller/action name when useful
-3. fallback `METHOD /masked/path/:id`
+3. no route matched (404, bots, static files): the single bucket `[unmatched]` — the SDK 3.2
+   integrations do this, and keep the masked path in the span attribute `url.path`
 
-Do not group by raw URL with query strings.
+Do not group by raw URL with query strings, and do not use the path as the route of an unmatched
+request: every bot URL becomes a route row.
 
 ---
 
 ## 4) Adonis HTTP Telemetry
 
-Use the official SDK Adonis integration when it produces reliable request events and HTTP spans for the app version.
+Use the official SDK middleware (SDK 3.2+, Adonis 6/7) as SERVER middleware, first in the list, in
+`start/kernel.ts`:
 
-If a custom middleware is needed, it must:
+```ts
+server.use([() => import('cc-stacktracer/adonis/middleware'), () => import('#middleware/container_bindings_middleware')]);
+```
+
+Server middleware runs before routing, so 404s, session and CSRF failures are traced, and the root span
+still gets the route pattern (read after the match).
+
+Up to SDK 3.1 the official middleware emitted nothing in a real Adonis app (it called
+`ctx.response.getResponse()`, which Adonis does not have). A custom middleware written for that reason
+should be replaced by the official one on 3.2+.
+
+If a custom middleware is still needed, build it on `startHttpRequest` from `cc-stacktracer/generic-http`
+and pass the route as a function — `route: () => ctx.route?.pattern` — or call `trace.setRoute(pattern)`.
+Never write to internal fields of the SDK objects. It must:
 
 - start timing before `await next()`
-- catch/rethrow errors so Adonis semantics are preserved
+- NOT rely on a `catch` around `await next()`: the Adonis exception handler handles the exception inside
+  `next()`, so that catch never runs (see §8)
 - record final response status after `await next()`
 - compute integer non-negative duration
-- emit one request event
-- emit one root HTTP span
-- make the request event `trace.span_id` equal the root HTTP span `span_id`
+- emit one root HTTP span (v4 has no separate request event)
+- make events emitted during the request carry the root HTTP span `span_id` as `trace.span_id`
 - preserve trace context for child DB/business spans
 
 Recommended span fields:
@@ -212,17 +228,36 @@ If raw SQL is generated dynamically, the code must prove untrusted values are pa
 
 ## 8) Error Handling in Adonis
 
-Since SDK 3.0 the Adonis middleware sees the exception and, when the exception handler answers with a
-server error status (default `500-599`), sends it as ONE error event linked to the root HTTP span. No
-`captureException` is required for that; an exception mapped to a 4xx is not an error.
+The Adonis exception handler handles the exception INSIDE the middleware's `next()`: `next()` resolves
+normally, and no middleware — the SDK's included — ever sees the exception. So the SDK cannot capture a
+5xx on its own in Adonis. (Up to rule 0.4.1 this section said the opposite; that was wrong.)
+
+SDK 3.2+: call `StackTrace.recordRequestError(error)` in the handler's `report()`:
+
+```ts
+// app/exceptions/handler.ts
+export default class HttpExceptionHandler extends ExceptionHandler {
+  async report(error: unknown, ctx: HttpContext) {
+    StackTrace.recordRequestError(error);
+    return super.report(error, ctx);
+  }
+}
+```
+
+The response then decides: a server error status (default `500-599`) becomes ONE error event, with the
+final status and the route, linked to the root HTTP span, and the root span carries `error_type` and
+`error_message`; an exception mapped to a 4xx is not an error and sends nothing.
+
+SDK 3.1 and earlier: keep `StackTrace.captureException(error, context)` in `report()` — it is the only
+source of the stack of a 5xx. It is sent before the status exists, so filter out 4xx yourself.
 
 Recommended flow:
 
 1. Controllers/services throw.
 2. Adonis exception handler maps the user-facing response — the status decides.
-3. The SDK sends the error event automatically.
-4. Optionally, the internal monitor calls `StackTrace.captureException(error, context)` with the same
-   error object to add safe diagnostic context — still one event.
+3. `report()` calls `StackTrace.recordRequestError(error)`; the SDK sends the event only for a 5xx.
+4. Optionally, `report()` also calls `StackTrace.captureException(error, context)` with the same error
+   object to add safe diagnostic context — still one event.
 
 Context, when added, should include:
 
@@ -343,13 +378,20 @@ Verify before considering an Adonis/Lucid integration complete:
 
 ## 12) Troubleshooting by Symptom
 
+### A 5xx has no error event, or the root span has no `error_type`
+
+1. Verify the exception handler `report()` calls `StackTrace.recordRequestError(error)` (SDK 3.2+).
+2. Verify the SDK middleware is registered in `server.use`: `report()` must run inside the request.
+3. Verify the status is in `httpServerErrorStatuses` (default `500-599`).
+
 ### Request events arrive but HTTP spans do not
 
-1. Verify the HTTP middleware creates trace context.
-2. Verify response status/duration are available after `await next()`.
-3. Verify capture policy did not suppress the request.
-4. Verify `/v1/spans` accepts API-key project/tenant scope.
-5. Verify the request event `trace.span_id` matches the HTTP root span.
+1. On SDK 3.1 or earlier, the official middleware emits nothing in a real Adonis app — upgrade to 3.2.
+2. Verify the HTTP middleware creates trace context.
+3. Verify response status/duration are available after `await next()`.
+4. Verify capture policy did not suppress the request.
+5. Verify `/v1/spans` accepts API-key project/tenant scope.
+6. Verify the request event `trace.span_id` matches the HTTP root span.
 
 ### Lucid queries execute but DB spans are missing
 
@@ -382,7 +424,8 @@ Verify before considering an Adonis/Lucid integration complete:
 - HTTP root span emitted
 - request event `trace.span_id` matches the HTTP root span `span_id`
 - DB/business/external spans have `parent_span_id` during requests
-- exception handler captures once through monitor transport
+- exception handler `report()` calls `StackTrace.recordRequestError(error)`
+- a thrown 5xx shows up as one error event and a root span with `error_type`
 - Lucid or repository DB operations wrapped with `runQuery`
 - raw SQL parameterized and instrumented
 - user context set after auth and cleared after response
