@@ -1,11 +1,13 @@
 import http from 'node:http';
+import { hostname } from 'node:os';
 import type { AddressInfo } from 'node:net';
 import { afterEach, describe, expect, it } from 'vitest';
 import { AppFactory } from '@adonisjs/core/factories/app';
 import { ServerFactory } from '@adonisjs/core/factories/http';
 import { Exception } from '@adonisjs/core/exceptions';
 import { ExceptionHandler, type HttpContext } from '@adonisjs/core/http';
-import { flush, init, log, recordRequestError, shutdown } from '../index.js';
+import { flush, init, log, recordRequestError, shutdown, withSpan } from '../index.js';
+import { SDK_VERSION } from '../core/sdk-version.js';
 import type { BatchTransportPayload, StackTraceEvent } from '../index.js';
 import type { SdkSpanRow } from '../core/span-payload.types.js';
 import { stacktraceAdonisMiddleware } from './adonis.js';
@@ -233,5 +235,41 @@ describe('Adonis real: middleware de rota (funcao)', () => {
     await app.close();
 
     expect(rootSpans(spans)[0]).toMatchObject({ http_route: '/items/:id', http_status_code: 200 });
+  });
+});
+
+describe('Adonis real: identidade no span raiz', () => {
+  it('le o socket cru do Adonis (ctx.request.request), e o withSpan filho fica sem os campos', async () => {
+    const spans: SdkSpanRow[] = [];
+    init({
+      apiKey: 'k',
+      endpoint: 'http://localhost:1',
+      serviceId: SERVICE_ID,
+      clientIp: { enabled: true },
+      transport: async (payload: unknown) => {
+        const p = payload as BatchTransportPayload;
+        if (p.kind === 'spans') spans.push(...p.spans);
+      },
+    });
+    const app = await adonisApp({
+      routes: (router) => {
+        router.get('/users/:id', async () => withSpan('load.user', async () => 'ok'));
+      },
+    });
+    expect(await app.request('/users/7')).toBe(200);
+    await settle(spans);
+    await app.close();
+
+    const root = rootSpans(spans)[0];
+    expect(root?.attributes).toMatchObject({
+      'host.name': hostname(),
+      'process.pid': process.pid,
+      'telemetry.sdk.version': SDK_VERSION,
+      'client.address': '127.0.0.1',
+    });
+    expect(typeof root?.attributes?.['user_agent.original']).toBe('string');
+    const child = spans.find((s) => s.span_name === 'load.user');
+    expect(child?.parent_span_id).toBe(root?.span_id);
+    expect(child?.attributes ?? null).toBeNull();
   });
 });

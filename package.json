@@ -1,11 +1,11 @@
 {
   "name": "cc-stacktracer",
-  "version": "3.2.0",
+  "version": "3.3.0-rc.1",
   "description": "Observability SDK for Node.js — captures errors, structured logs, distributed traces and database spans, and ships them to a CC StackTracer ingestion API.",
   "license": "MIT",
   "type": "module",
   "engines": {
-    "node": ">=18"
+    "node": ">=20"
   },
   "//redisMemoryServer": "O postinstall da lib compila o Redis do source, e a tag `stable` que ela baixa passou a trazer RediSearch/RedisJSON/RedisTimeSeries — cujo build exige um toolchain que nem o runner do CI nem as imagens Docker tem. Resultado: `npm ci` falhava em todo lugar. Ela e devDependency do ingestion-api e serve apenas ao script local `npm run redis:dev`, que baixa o binario sob demanda na primeira execucao. Desligar o postinstall nao tira funcionalidade nenhuma.",
   "redisMemoryServer": {
@@ -31,6 +31,8 @@
     "docs/guides/subtenant.md",
     "docs/guides/integration-adonis.md",
     "docs/guides/integration-adonis.en-US.md",
+    "docs/guides/integration-nestjs.md",
+    "docs/guides/integration-nestjs.en-US.md",
     "cursor-rules"
   ],
   "exports": {
@@ -80,6 +82,34 @@
       "default": "./dist/plugin-sdk.js"
     }
   },
+  "typesVersions": {
+    "*": {
+      "fastify": [
+        "./dist/integrations/fastify.d.ts"
+      ],
+      "express": [
+        "./dist/integrations/express.d.ts"
+      ],
+      "adonis": [
+        "./dist/integrations/adonis.d.ts"
+      ],
+      "adonis/middleware": [
+        "./dist/integrations/adonis-middleware.d.ts"
+      ],
+      "generic-http": [
+        "./dist/generic-http/index.d.ts"
+      ],
+      "db-prisma": [
+        "./dist/db/prisma.d.ts"
+      ],
+      "db-lucid": [
+        "./dist/db/lucid.d.ts"
+      ],
+      "plugin-sdk": [
+        "./dist/plugin-sdk.d.ts"
+      ]
+    }
+  },
   "bin": {
     "cc-stacktracer": "./dist/cli/index.js"
   },
@@ -88,7 +118,7 @@
     "build:client": "tsc -p tsconfig.build.json",
     "pack:client": "npm run build:client && npm pack",
     "pack:client:dry": "npm run build:client && npm pack --dry-run",
-    "test": "vitest run",
+    "test": "vitest run --dir src",
     "lint": "eslint \"src/**/*.ts\"",
     "format": "prettier --write \"src/**/*.ts\" \"*.{md,json}\" \"docs/**/*.md\"",
     "format:check": "prettier --check \"src/**/*.ts\"",
@@ -121,8 +151,7 @@
     "@adonisjs/lucid": ">=20.0.0",
     "@prisma/client": ">=5.0.0",
     "express": ">=4.0.0 || >=5.0.0",
-    "fastify": ">=4.0.0",
-    "fastify-plugin": ">=4.0.0"
+    "fastify": ">=4.0.0"
   },
   "peerDependenciesMeta": {
     "@adonisjs/core": {
@@ -139,13 +168,10 @@
     },
     "fastify": {
       "optional": true
-    },
-    "fastify-plugin": {
-      "optional": true
     }
   },
   "devDependencies": {
-    "@adonisjs/core": "^7.5.2",
+    "@adonisjs/core": "^7.3.3",
     "@eslint/js": "^10.0.1",
     "@types/express": "^5.0.6",
     "@types/node": "^22.10.0",
@@ -153,7 +179,6 @@
     "eslint": "^10.1.0",
     "express": "^5.2.1",
     "fastify": "^5.8.5",
-    "fastify-plugin": "^5.1.0",
     "prettier": "3.8.1",
     "supertest": "^7.2.2",
     "typescript": "^5.7.2",
@@ -165,13 +190,13 @@
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/davi-alves-work/cc-stacktracer.git"
+    "url": "git+https://github.com/DaviAlv3z/cc-stacktracer.git"
   },
   "author": "Davi Alves",
   "bugs": {
-    "url": "https://github.com/davi-alves-work/cc-stacktracer/issues"
+    "url": "https://github.com/DaviAlv3z/cc-stacktracer/issues"
   },
-  "homepage": "https://github.com/davi-alves-work/cc-stacktracer#readme",
+  "homepage": "https://github.com/DaviAlv3z/cc-stacktracer#readme",
   "publishConfig": {
     "access": "public"
   }

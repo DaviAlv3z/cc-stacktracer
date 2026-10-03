@@ -27,6 +27,14 @@ const urlRedactionSchema = z
   })
   .strict();
 
+const clientIpSchema = z
+  .object({
+    enabled: z.boolean().optional(),
+    header: z.string().trim().min(1).max(256).optional(),
+    trustedProxies: z.number().int().min(1).optional(),
+  })
+  .strict();
+
 const sdkLoggerSchema = z.custom<NonNullable<StackTraceInitOptions['logger']>>((val) => {
   if (typeof val !== 'object' || val === null || Array.isArray(val)) {
     return false;
@@ -88,6 +96,7 @@ export const stackTraceInitSchema = z
     debug: z.boolean().optional(),
     headerRedaction: headerRedactionSchema.optional(),
     urlRedaction: urlRedactionSchema.optional(),
+    clientIp: clientIpSchema.optional(),
     release: z.string().min(1).max(256).optional(),
     capturePolicyRefreshMs: z.number().int().min(0).optional(),
     capturePolicyUrl: z.string().min(1).max(2048).optional(),

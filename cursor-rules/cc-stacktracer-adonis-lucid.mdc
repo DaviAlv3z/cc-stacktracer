@@ -1,7 +1,7 @@
 ---
 alwaysApply: false
-version: 0.5.0
-lastUpdated: 2026-09-26
+version: 0.6.0
+lastUpdated: 2026-10-03
 ruleset: cc-stacktracer-adonis-lucid
 extends: cc-stacktracer-core.mdc
 ---
@@ -162,6 +162,12 @@ Do not build full canonical v4 events manually in `beforeSend`.
 ## 6) Lucid Instrumentation Strategy
 
 Prefer clarity over maximum automatic coverage.
+
+SDK 3.3+: one `StackTrace.auto({ ..., lucid: db })` in a `start/stacktrace.ts` preload (first in `preloads`;
+`import db from '@adonisjs/lucid/services/db'`) instruments every Lucid connection, with `db_system` taken
+from the driver. Add `app.terminating(() => StackTrace.shutdown())` there so the deploy's SIGTERM sends what
+is queued. Up to 3.2 the Lucid wiring silently instrumented nothing — if an app on 3.2 or earlier shows no DB
+spans, upgrade before debugging.
 
 Use one of:
 

@@ -1,13 +1,22 @@
 name: Publish to npm
 
-# Publishes the SDK when a version tag is pushed (e.g. v2.0.0).
+# Publishes the SDK when a version tag is pushed (e.g. v3.3.0-rc.1 or v3.3.0).
 #
-# Requires the repository secret NPM_TOKEN — an npm automation token with
-# publish rights (npmjs.com > Access Tokens > Generate > Automation).
+# The dist-tag comes from the version (D3 in the 3.3 plan): a release candidate (`-rc.N`) goes to `next`;
+# a final release goes to `latest` and also moves `next` to it, so `@next` never lags behind. Any other
+# prerelease suffix is refused.
+#
+# Nothing is published before the packed package passes the consumer smoke — real projects and apps, on
+# Node 20/22/24/26, inside containers, against real PostgreSQL, MySQL and SQL Server — and the package gates
+# (types for every module resolution, the manifest, and no public export removed since `latest`).
+#
+# Requires the repository secret NPM_TOKEN — an npm token with publish rights.
 #
 # `id-token: write` enables npm provenance: npm records, cryptographically,
 # that this exact tarball was built by this workflow from this commit. It shows
-# up as a "Provenance" badge on the package page.
+# up as a "Provenance" badge on the package page. The provenance repository must
+# match package.json `repository.url` (DaviAlv3z/cc-stacktracer), or npm refuses
+# the publish with E422.
 
 on:
   push:
@@ -21,7 +30,44 @@ on:
         default: true
 
 jobs:
+  # The token is checked first: an expired token would otherwise only show up after 40 minutes of smoke.
+  preflight:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          registry-url: 'https://registry.npmjs.org'
+      - name: npm token is valid
+        if: github.event_name == 'push' || inputs.dry_run == false
+        run: npm whoami
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+  # The package as a client installs it, on every supported Node, before any publish. The 2026-09 failures
+  # passed every unit test; none of them passes here.
+  consumer-smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        node: ['20', '22', '24', '26']
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+      - name: Install dependencies
+        run: npm ci
+      - name: Build
+        run: npm run build
+      - name: Consumer smoke (Node ${{ matrix.node }}, in containers)
+        run: node consumer-smoke/docker.mjs --node ${{ matrix.node }}
+
   publish:
+    needs: [preflight, consumer-smoke]
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -101,12 +147,43 @@ jobs:
             console.log('Tarball contains all', required.length, 'required entries.');
           "
 
+      # Types resolve under node10, node16 (CJS and ESM) and bundler; the manifest is valid; and nothing the
+      # current `latest` exports is gone (a removed export in a minor breaks clients on upgrade).
+      - name: Package gates (types, manifest, public API)
+        run: |
+          rm -rf /tmp/pkg && mkdir -p /tmp/pkg && npm pack --pack-destination /tmp/pkg --silent
+          TGZ=$(ls /tmp/pkg/cc-stacktracer-*.tgz)
+          npx --yes @arethetypeswrong/cli@0.18.5 "$TGZ" --ignore-rules cjs-resolves-to-esm
+          npx --yes publint@0.3.25 run . --strict --pack npm
+          node scripts/check-sdk-api-compat.mjs "$TGZ" --against cc-stacktracer@latest
+
+      - name: Resolve dist-tag
+        id: dist
+        run: |
+          VERSION=$(node -p "require('./package.json').version")
+          case "$VERSION" in
+            *-rc.*) TAG=next ;;
+            *-*) echo "Prerelease $VERSION is not -rc.N: refusing to pick a dist-tag."; exit 1 ;;
+            *) TAG=latest ;;
+          esac
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "cc-stacktracer@$VERSION -> $TAG"
+
       - name: Publish
         if: github.event_name == 'push' || inputs.dry_run == false
-        run: npm publish --provenance --access public
+        run: npm publish --provenance --access public --tag ${{ steps.dist.outputs.tag }}
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      # After a final release, `next` points at it too: `npm i cc-stacktracer@next` never installs an
+      # older RC than `latest`.
+      - name: Move next to the final release
+        if: (github.event_name == 'push' || inputs.dry_run == false) && steps.dist.outputs.tag == 'latest'
+        run: npm dist-tag add "cc-stacktracer@${{ steps.dist.outputs.version }}" next
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
       - name: Dry run summary
         if: github.event_name == 'workflow_dispatch' && inputs.dry_run
-        run: echo "Dry run complete — every check passed, publish skipped."
+        run: echo "Dry run complete — every check passed, publish skipped (dist-tag would be ${{ steps.dist.outputs.tag }})."

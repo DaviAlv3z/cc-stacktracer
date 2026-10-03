@@ -37,7 +37,6 @@ describe('client package manifest', () => {
 
     expect(pkg.peerDependencies).toMatchObject({
       fastify: expect.any(String),
-      'fastify-plugin': expect.any(String),
       express: expect.any(String),
       '@adonisjs/core': expect.any(String),
       '@adonisjs/lucid': expect.any(String),
@@ -45,7 +44,6 @@ describe('client package manifest', () => {
     });
     expect(pkg.peerDependenciesMeta).toMatchObject({
       fastify: { optional: true },
-      'fastify-plugin': { optional: true },
       express: { optional: true },
       '@adonisjs/core': { optional: true },
       '@adonisjs/lucid': { optional: true },
@@ -61,5 +59,31 @@ describe('client package manifest', () => {
       'pack:client': expect.any(String),
       'pack:client:dry': expect.any(String),
     });
+  });
+
+  it('a integração Fastify não depende de fastify-plugin (o Fastify não o instala)', () => {
+    const pkg = readPackageJson();
+    expect(pkg.peerDependencies).not.toHaveProperty('fastify-plugin');
+    expect(pkg.peerDependenciesMeta).not.toHaveProperty('fastify-plugin');
+    const source = readFileSync(join(repoRoot, 'src/integrations/fastify.ts'), 'utf8');
+    expect(source).not.toMatch(/from 'fastify-plugin'/);
+  });
+
+  it('o .d.ts raiz não importa tipos de peer opcional (fastify): projeto sem Fastify e skipLibCheck: false compila', () => {
+    for (const rel of ['src/core/config.types.ts', 'src/index.ts']) {
+      expect(readFileSync(join(repoRoot, rel), 'utf8')).not.toMatch(/import\(['"]fastify['"]\)|from 'fastify'/);
+    }
+  });
+
+  it('typesVersions cobre cada subpath do exports (TypeScript com moduleResolution node10, o NestJS 10/11)', () => {
+    const pkg = readPackageJson() as ReturnType<typeof readPackageJson> & {
+      typesVersions?: Record<string, Record<string, string[]>>;
+    };
+    const map = pkg.typesVersions?.['*'] ?? {};
+    const subpaths = Object.entries(pkg.exports ?? {}).filter(([subpath]) => subpath !== '.');
+    for (const [subpath, target] of subpaths) {
+      expect(map[subpath.slice(2)], subpath).toEqual([(target as { types: string }).types]);
+    }
+    expect(Object.keys(map)).toHaveLength(subpaths.length);
   });
 });

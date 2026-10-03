@@ -1,0 +1,7 @@
+{
+  "name": "smoke-ts-cjs-nodenext",
+  "private": true,
+  "scripts": { "smoke": "tsc -p . && node dist/main.js" },
+  "dependencies": { "typescript": "~5.8.3", "@types/node": "^22.10.0", "express": "^5.2.1", "@types/express": "^5.0.6" },
+  "smoke": { "requireEsm": true }
+}

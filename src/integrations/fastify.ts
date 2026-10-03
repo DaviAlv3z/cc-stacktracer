@@ -1,6 +1,5 @@
 import { randomBytes } from 'node:crypto';
-import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
-import fp from 'fastify-plugin';
+import type { FastifyInstance, FastifyPluginAsync, FastifyReply, FastifyRequest } from 'fastify';
 import type { StackTracePlugin } from '../core/plugins/types.js';
 import { getRequestSnapshot, runWithRequestContext, type HttpRequestSnapshot } from '../core/request-context.js';
 import { isTelemetryActive, safeRun } from '../core/safe-run.js';
@@ -13,6 +12,7 @@ import { headersToRecord } from '../utils/headers.js';
 import { redactUrl } from '../utils/redact-url.js';
 import { httpRootSpanOutcome } from './http-root-span-outcome.js';
 import { httpRootSpanRoute } from './http-root-span-route.js';
+import { httpRootSpanIdentity, withRootSpanAttributes, type HttpRootSpanIdentity } from './http-root-span-identity.js';
 import { completeLocalRoot, recordBoundaryError } from '../core/error-tracking.js';
 import { warnRemovedCaptureErrors } from './removed-options.js';
 
@@ -30,7 +30,12 @@ const START_TIME_KEY = Symbol.for('cc-stacktracer.startTime');
 const TRACE_CTX_KEY = Symbol.for('cc-stacktracer.traceCtx');
 const EMITTED_KEY = Symbol.for('cc-stacktracer.rootSpanEmitted');
 
-type RootTraceCtx = { traceId: string; rootSpanId: string; parentSpanId: string | undefined };
+type RootTraceCtx = {
+  traceId: string;
+  rootSpanId: string;
+  parentSpanId: string | undefined;
+  identity: HttpRootSpanIdentity | undefined;
+};
 
 type TracedRequest = FastifyRequest & {
   [START_TIME_KEY]?: number;
@@ -102,13 +107,17 @@ function emitRootSpan(
     ...httpRootSpanOutcome(aborted, reply.statusCode, boundaryError),
     http_method: request.method,
     http_route: routeFields.http_route,
-    ...(routeFields.attributes !== undefined ? { attributes: routeFields.attributes } : {}),
+    ...withRootSpanAttributes(ctx.identity, routeFields.attributes),
   });
 }
 
 /** Template da rota casada; `undefined` quando nenhuma rota casou (404). */
 function fastifyRouteTemplate(req: TracedRequest): string | undefined {
-  const route = typeof req.routerPath === 'string' && req.routerPath !== '' ? req.routerPath : req.routeOptions?.url;
+  // `routeOptions.url` existe no Fastify 4 recente e é o único no 5. `routerPath` fica só para o 4 antigo,
+  // sem `routeOptions`: ler a propriedade nas versões novas do 4 dispara o DeprecationWarning FSTDEP017
+  // no console do cliente — até no 404, em que `routeOptions.url` é `undefined`.
+  const options = req.routeOptions as { url?: string } | undefined;
+  const route = options !== undefined && 'url' in options ? options.url : req.routerPath;
   return typeof route === 'string' && route !== '' ? route : undefined;
 }
 
@@ -134,7 +143,15 @@ function prepareRequest(request: FastifyRequest, client: StackTraceClient | null
   const correlation = extractCorrelationFromHeaders(raw);
   const traceId = correlation.traceId ?? randomBytes(16).toString('hex');
   const rootSpanId = randomBytes(8).toString('hex');
-  req[TRACE_CTX_KEY] = { traceId, rootSpanId, parentSpanId: correlation.parentSpanId };
+  // `request.raw.socket`, e nao `request.ip`: este depende do `trustProxy` do Fastify, e o IP segue `init({ clientIp })`.
+  const identity = httpRootSpanIdentity({
+    client,
+    headers,
+    rawHeaders: raw,
+    requestId: correlation.requestId,
+    socketAddress: request.raw.socket?.remoteAddress,
+  });
+  req[TRACE_CTX_KEY] = { traceId, rootSpanId, parentSpanId: correlation.parentSpanId, identity };
   return { snapshot, traceId, rootSpanId, parentSpanId: correlation.parentSpanId, traceFlags: correlation.traceFlags };
 }
 
@@ -190,7 +207,17 @@ async function stacktracePluginImpl(
   });
 }
 
-const stacktracePlugin = fp(stacktracePluginImpl, { name: 'cc-stacktracer' });
+/**
+ * O mesmo que o `fastify-plugin` faria: `skip-override` tira o plugin do encapsulamento, para os hooks
+ * valerem na app inteira, e o nome aparece em `printPlugins()`/`hasPlugin()`. Feito aqui para o SDK não
+ * depender do `fastify-plugin`, que o Fastify não instala: sem ele, `import 'cc-stacktracer/fastify'`
+ * derrubava o boot com ERR_MODULE_NOT_FOUND.
+ */
+const stacktracePlugin: FastifyPluginAsync<StacktracePluginOptions> = Object.assign(stacktracePluginImpl, {
+  [Symbol.for('skip-override')]: true,
+  [Symbol.for('fastify.display-name')]: 'cc-stacktracer',
+  [Symbol.for('plugin-meta')]: { name: 'cc-stacktracer' },
+});
 export default stacktracePlugin;
 
 /** Registry entry; attach hooks via `app.register(default)` or `StackTrace.auto({ fastify: app })`. */

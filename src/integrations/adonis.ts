@@ -11,6 +11,7 @@ import { redactHeaders } from '../utils/redact-headers.js';
 import { redactUrl } from '../utils/redact-url.js';
 import { httpRootSpanOutcome } from './http-root-span-outcome.js';
 import { httpRootSpanRoute } from './http-root-span-route.js';
+import { httpRootSpanIdentity, withRootSpanAttributes } from './http-root-span-identity.js';
 import { completeLocalRoot, recordBoundaryError } from '../core/error-tracking.js';
 import { warnRemovedCaptureErrors } from './removed-options.js';
 
@@ -38,6 +39,8 @@ export type AdonisHttpContextLike = {
     ip?(): string;
     header?(name: string): string | undefined;
     protocol?(): string;
+    /** A requisicao crua do Node (`IncomingMessage`): o endereco do socket, para `init({ clientIp })`. */
+    request?: { socket?: { remoteAddress?: string | undefined } };
   };
   response: {
     /** Adonis 6/7: `ctx.response.response` e a resposta crua do Node. */
@@ -93,6 +96,14 @@ function prepareRequest(ctx: AdonisHttpContextLike, opts: StacktraceAdonisOption
   const emitHttpRootSpan = opts?.emitHttpRootSpan !== false;
   const traceId = correlation.traceId ?? randomBytes(16).toString('hex');
   const rootSpanId = randomBytes(8).toString('hex');
+  // O socket cru, e nao `ctx.request.ip()`: este depende do `trustProxy` do app, e o IP segue `init({ clientIp })`.
+  const identity = httpRootSpanIdentity({
+    client,
+    headers,
+    rawHeaders,
+    requestId: correlation.requestId,
+    socketAddress: ctx.request.request?.socket?.remoteAddress,
+  });
 
   // Emit the root span exactly once, however the request ends. `finish` covers a completed
   // response; `close` is the fallback for aborted/timed-out connections where `finish` never
@@ -140,7 +151,7 @@ function prepareRequest(ctx: AdonisHttpContextLike, opts: StacktraceAdonisOption
       ...httpRootSpanOutcome(aborted, statusCode, boundaryError),
       http_method: method,
       http_route: route.http_route,
-      ...(route.attributes !== undefined ? { attributes: route.attributes } : {}),
+      ...withRootSpanAttributes(identity, route.attributes),
     });
   };
 

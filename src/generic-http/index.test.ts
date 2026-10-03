@@ -1,5 +1,7 @@
+import { hostname } from 'node:os';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { getStackTraceClient, init, log, shutdown } from '../index.js';
+import { getStackTraceClient, init, log, shutdown, withSpan } from '../index.js';
+import { SDK_VERSION } from '../core/sdk-version.js';
 import { resetFailOpenState } from '../core/safe-run.js';
 import { StackTraceHttpRequest, startHttpRequest } from './index.js';
 import type { BatchTransportPayload } from '../core/stacktrace-client.js';
@@ -281,7 +283,7 @@ describe('generic-http: rota conhecida so depois do roteamento (3.2)', () => {
 
     const { root } = await sent(transport);
     expect(root).toMatchObject({ http_route: '[unmatched]', span_name: 'GET [unmatched]' });
-    expect(root.attributes).toEqual({ 'url.path': '/.env' });
+    expect(root.attributes?.['url.path']).toBe('/.env');
   });
 
   it('sem route nenhum o span continua com o path mascarado', async () => {
@@ -292,5 +294,113 @@ describe('generic-http: rota conhecida so depois do roteamento (3.2)', () => {
 
     const { root } = await sent(transport);
     expect(root.http_route).toBe('/clientes/:id');
+  });
+});
+
+describe('generic-http: identidade no span raiz', () => {
+  const IDENTITY = { 'host.name': hostname(), 'process.pid': process.pid, 'telemetry.sdk.version': SDK_VERSION };
+
+  afterEach(async () => {
+    await shutdown();
+  });
+
+  function initWith(extra: Record<string, unknown> = {}): ReturnType<typeof vi.fn> {
+    const transport = vi.fn().mockResolvedValue(undefined);
+    init({
+      apiKey: 'k',
+      serviceId: '11111111-1111-4111-8111-111111111111',
+      endpoint: 'https://ingest.example.com',
+      sendMode: 'immediate',
+      transport,
+      ...extra,
+    });
+    return transport;
+  }
+
+  const spansOf = (transport: ReturnType<typeof vi.fn>) =>
+    transport.mock.calls.flatMap((c) => {
+      const p = c[0] as BatchTransportPayload;
+      return p.kind === 'spans' ? p.spans : [];
+    });
+
+  async function rootOf(transport: ReturnType<typeof vi.fn>) {
+    await vi.waitFor(() => expect(spansOf(transport).some((s) => s.span_type === 'http')).toBe(true));
+    return spansOf(transport).find((s) => s.span_type === 'http')!;
+  }
+
+  it('user-agent, request id, host, pid e versao do SDK; sem IP por padrao, mesmo com clientAddress', async () => {
+    const transport = initWith();
+    const trace = startHttpRequest({
+      method: 'GET',
+      url: '/x',
+      route: '/x',
+      headers: { 'User-Agent': 'Mozilla/5.0 (smoke)' },
+      requestId: 'req-7',
+      clientAddress: '198.51.100.4',
+    });
+    await trace.run(async () => undefined);
+    trace.end({ statusCode: 200 });
+    expect((await rootOf(transport)).attributes).toEqual({
+      ...IDENTITY,
+      'user_agent.original': 'Mozilla/5.0 (smoke)',
+      'http.request_id': 'req-7',
+    });
+  });
+
+  it('com clientIp ligado: o clientAddress informado, normalizado', async () => {
+    const transport = initWith({ clientIp: { enabled: true } });
+    const trace = startHttpRequest({ method: 'GET', url: '/x', route: '/x', clientAddress: '::ffff:127.0.0.1' });
+    trace.end({ statusCode: 200 });
+    expect((await rootOf(transport)).attributes?.['client.address']).toBe('127.0.0.1');
+  });
+
+  it('com x-forwarded-for e trustedProxies: o IP certo', async () => {
+    const transport = initWith({ clientIp: { enabled: true, header: 'x-forwarded-for', trustedProxies: 1 } });
+    const trace = startHttpRequest({
+      method: 'GET',
+      url: '/x',
+      route: '/x',
+      headers: { 'x-forwarded-for': '1.1.1.1, 203.0.113.7' },
+      clientAddress: '10.0.0.2',
+    });
+    trace.end({ statusCode: 200 });
+    expect((await rootOf(transport)).attributes?.['client.address']).toBe('203.0.113.7');
+  });
+
+  it('end chamado fora do contexto da requisicao: os campos continuam la', async () => {
+    const transport = initWith();
+    const trace = startHttpRequest({ method: 'GET', url: '/x', route: '/x', headers: { 'user-agent': 'late' } });
+    await trace.run(async () => undefined);
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    trace.end({ statusCode: 200 });
+    expect((await rootOf(transport)).attributes).toEqual({ ...IDENTITY, 'user_agent.original': 'late' });
+  });
+
+  it('404 [unmatched]: url.path junto dos campos novos', async () => {
+    const transport = initWith();
+    const trace = startHttpRequest({ method: 'GET', url: '/.env', route: () => undefined });
+    trace.end({ statusCode: 404 });
+    const root = await rootOf(transport);
+    expect(root.http_route).toBe('[unmatched]');
+    expect(root.attributes).toEqual({ ...IDENTITY, 'url.path': '/.env' });
+  });
+
+  it('withSpan filho dentro do run: nenhum dos campos novos', async () => {
+    const transport = initWith({ clientIp: { enabled: true } });
+    const trace = startHttpRequest({
+      method: 'GET',
+      url: '/x',
+      route: '/x',
+      headers: { 'user-agent': 'ua' },
+      requestId: 'r',
+      clientAddress: '127.0.0.1',
+    });
+    await trace.run(() => withSpan('child.work', async () => 'ok', { attributes: { step: 1 } }));
+    trace.end({ statusCode: 200 });
+    const root = await rootOf(transport);
+    expect(root.attributes?.['client.address']).toBe('127.0.0.1');
+    const child = spansOf(transport).find((s) => s.span_name === 'child.work');
+    expect(child?.parent_span_id).toBe(root.span_id);
+    expect(child?.attributes).toEqual({ step: 1 });
   });
 });

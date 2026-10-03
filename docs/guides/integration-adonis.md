@@ -9,18 +9,34 @@ handler e a instrumentação de banco via Lucid/Knex. Requer SDK 3.2 ou posterio
 
 ## Onde inicializar
 
-Chame `StackTrace.init` durante o boot da aplicação (por exemplo em um preload de `start/`), **antes**
-de atender tráfego HTTP.
+Num preload próprio, `start/stacktrace.ts`, registrado **primeiro** em `preloads` no `adonisrc.ts`, antes de `#start/routes` e `#start/kernel`. É uma única inicialização, pelo `auto`. Ela também liga o Lucid e, quando o Adonis encerra (o SIGTERM do deploy), envia o que estiver na fila:
 
 ```ts
-import { StackTrace } from 'cc-stacktracer';
+// start/stacktrace.ts
+import app from '@adonisjs/core/services/app'
+import db from '@adonisjs/lucid/services/db'
+import { StackTrace } from 'cc-stacktracer'
 
-StackTrace.init({
+await StackTrace.auto({
   apiKey: process.env.STACKTRACE_API_KEY!,
   serviceId: process.env.STACKTRACE_SERVICE_ID!,
   endpoint: process.env.STACKTRACE_ENDPOINT!,
-});
+  enableGlobalHandlers: true,
+  lucid: db,
+})
+
+// SIGTERM (deploy, `docker stop`): o Adonis encerra a app e o SDK envia o que ainda está na fila.
+app.terminating(async () => {
+  await StackTrace.shutdown()
+})
 ```
+
+```ts
+// adonisrc.ts
+preloads: [() => import('#start/stacktrace'), () => import('#start/routes'), () => import('#start/kernel')],
+```
+
+Não chame `init` e depois `auto`: a segunda chamada substitui o cliente da primeira. Este é o arranjo que o smoke de consumidor roda num app gerado pelo `create-adonisjs` (Adonis 6 e 7).
 
 ## Middleware HTTP
 
@@ -109,8 +125,9 @@ rota mais tarde, use `trace.setRoute(pattern)`.
 
 ## Banco de dados (Lucid / Knex)
 
-Envolva as queries importantes com `StackTrace.runQuery` na camada de repositório, ou use o subpath
-`cc-stacktracer/db-lucid` para instrumentação global no nível do Knex.
+O `lucid: db` do preload acima instrumenta toda conexão do Lucid, inclusive as abertas depois do boot, com `db_system` do driver: `pg` → `postgres`, `mysql2` → `mysql`, `mssql` → `sqlserver`, `better-sqlite3` → `sqlite`. Funciona do Lucid 20 ao 22.
+
+Sem `auto`: `StackTrace.register(createLucidStackTracePlugin(db))` (de `cc-stacktracer/db-lucid`) depois do `init`. Para dar nome a operações críticas, envolva-as também com `StackTrace.runQuery`:
 
 ```ts
 import { StackTrace } from 'cc-stacktracer';

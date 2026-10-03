@@ -1,6 +1,6 @@
 import { buildLogEvent } from './capture/build-log-event.js';
 import { setSdkRuntime, getSdkRuntime } from './core/client-ref.js';
-import { resetFailOpenState, safeRun, safeRunAsync, setInternalFailureSink } from './core/safe-run.js';
+import { resetFailOpenState, runDetached, safeRun, safeRunAsync, setInternalFailureSink } from './core/safe-run.js';
 import { parseStackTraceInit, type ParsedStackTraceInit } from './core/config.schema.js';
 import { buildInternalFailureSink, reportInvalidConfig } from './core/init-diagnostics.js';
 import { isSdkDisabledByEnv } from './core/kill-switch.js';
@@ -16,6 +16,7 @@ import {
 } from './core/plugins/registry.js';
 import { hasDependency, loadAutoPlugins } from './core/plugins/auto-loader.js';
 import { registerGlobalHandlers, unregisterGlobalHandlers } from './core/global-handlers.js';
+import { installExitFlush } from './core/exit-flush.js';
 import { clearTags, clearUser, resetScopeMetadata, setTags, setUser, tag } from './core/scope-metadata.js';
 import { withBusinessContext, withBusinessContextAsync } from './core/business-context.js';
 import { createStackTraceClient, StackTraceClient, type BatchTransportPayload } from './core/stacktrace-client.js';
@@ -81,6 +82,8 @@ function startClient(parsed: ParsedStackTraceInit): void {
   const previous = getSdkRuntime().client;
   if (previous !== null) {
     previous.detachScheduling();
+    // O que o cliente anterior ainda tinha na fila sai pela configuração dele (até a 3.2 ficava para trás).
+    runDetached('init.flushPrevious', () => withDeadline(previous.flush({ ignoreBackoff: true }), FLUSH_DEADLINE_MS));
   }
   const nextClient = new StackTraceClient(parsed);
   const service: ServiceDescriptor = {
@@ -103,15 +106,19 @@ function startClient(parsed: ParsedStackTraceInit): void {
     }),
   });
   setInternalFailureSink(buildInternalFailureSink(parsed));
+  installExitFlush();
   if (parsed.enableGlobalHandlers) {
     registerGlobalHandlers({
       captureException: (err) => captureErrorOnce(err),
       flush: () => {
         const { client } = getSdkRuntime();
-        return client ? client.flush() : Promise.resolve();
+        // O evento do crash é o mais importante de todos: tenta mesmo dentro do backoff (A).
+        return client ? client.flush({ ignoreBackoff: true }) : Promise.resolve();
       },
     });
   }
+  // Plugins registrados antes do `init()` entram em ação agora (antes, só o `auto()` os inicializava).
+  runDetached('plugins.init', initRegisteredPlugins);
 }
 
 export function captureException(error: Error, context?: Record<string, unknown>): void {
@@ -180,7 +187,8 @@ export function logStructured(params: StructuredLogInput): void {
 export async function flush(): Promise<void> {
   const { client } = getSdkRuntime();
   if (client === null) return;
-  await safeRunAsync('flush', () => withDeadline(client.flush(), FLUSH_DEADLINE_MS));
+  // Quem chama flush() quer o envio agora: dentro do backoff de uma falha passageira, a fila voltava sem tentar (A).
+  await safeRunAsync('flush', () => withDeadline(client.flush({ ignoreBackoff: true }), FLUSH_DEADLINE_MS));
 }
 
 export async function shutdown(): Promise<void> {
@@ -188,6 +196,10 @@ export async function shutdown(): Promise<void> {
   unregisterGlobalHandlers();
   if (client !== null) {
     await safeRunAsync('shutdown', () => withDeadline(client.shutdown(), FLUSH_DEADLINE_MS));
+    // Prazo vencido com envio pendurado: sem isto o socket segurava o processo até o timeout do transporte.
+    safeRun('shutdown.abort', () => client.abortInFlight());
+    // O que não saiu até aqui está perdido: um aviso, em vez do silêncio (B).
+    safeRun('shutdown.unsent', () => client.reportUnsent());
     setSdkRuntime(null, null);
   }
   resetScopeMetadata();
@@ -214,7 +226,10 @@ export async function auto(options: StackTraceAutoOptions): Promise<void> {
   } catch {
     /* optional workspace packages */
   }
-  if (prisma !== undefined && hasDependency('@prisma/client')) {
+  // Sem `hasDependency` aqui: o objeto passado já prova que o pacote existe. O `@adonisjs/lucid` não exporta
+  // `./package.json`, a checagem dava false, e o `auto({ lucid: db })` ensinado pelo painel não instalava
+  // nada, em silêncio, até a 3.2.
+  if (prisma !== undefined) {
     try {
       const mod = (await import('./db/prisma.js')) as {
         createPrismaStackTracePlugin?: (p: unknown) => StackTracePlugin;
@@ -226,7 +241,7 @@ export async function auto(options: StackTraceAutoOptions): Promise<void> {
       /* optional */
     }
   }
-  if (lucid !== undefined && hasDependency('@adonisjs/lucid')) {
+  if (lucid !== undefined) {
     try {
       const mod = (await import('./db/lucid.js')) as {
         createLucidStackTracePlugin?: (db: unknown) => StackTracePlugin;
@@ -239,10 +254,11 @@ export async function auto(options: StackTraceAutoOptions): Promise<void> {
     }
   }
   await initRegisteredPlugins();
-  if (fastify !== undefined && hasDependency('fastify')) {
+  if (fastify !== undefined) {
     try {
       const { default: fastifyPlugin } = await import('./integrations/fastify.js');
-      await fastify.register(fastifyPlugin);
+      // O tipo público é estrutural (FastifyInstanceLike); a chamada real é a do Fastify.
+      await (fastify as unknown as { register: (plugin: unknown) => PromiseLike<unknown> }).register(fastifyPlugin);
     } catch (e) {
       console.warn('[cc-stacktracer] Fastify plugin failed to register:', e);
     }

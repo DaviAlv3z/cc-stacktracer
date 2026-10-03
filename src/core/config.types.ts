@@ -46,6 +46,20 @@ export type StackTraceInitOptions = {
   urlRedaction?: {
     extraSensitiveQueryKeys?: readonly string[];
   };
+  /**
+   * IP do cliente no span HTTP raiz (`attributes['client.address']`). Desligado por padrao: IP e dado pessoal.
+   *
+   * Sem `header`, o endereco do socket. Com `header: 'x-forwarded-for'`, a entrada `trustedProxies` saltos a
+   * partir da direita — nunca a mais a esquerda, que o cliente forja. Outro header (`x-real-ip`,
+   * `cf-connecting-ip`) e lido como valor unico. Header configurado e ausente na requisicao: sem IP.
+   * Configurar `header` sem um proxy na frente que o sobrescreva deixa o cliente escolher o IP que aparece.
+   */
+  clientIp?: {
+    enabled?: boolean;
+    header?: string;
+    /** Proxies confiaveis na frente da app; so vale para `x-forwarded-for`. Inteiro >= 1, padrao 1. */
+    trustedProxies?: number;
+  };
   /** App release (e.g. git SHA or semver) — merged into every event `context`. */
   release?: string;
   /**
@@ -93,12 +107,19 @@ export type StackTraceInitOptions = {
 };
 
 /**
+ * O mínimo do `FastifyInstance` que o `auto()` usa. Estrutural de propósito: o `.d.ts` raiz não pode importar
+ * `fastify` (peer opcional) — até a 3.2, todo projeto TypeScript sem Fastify e com `skipLibCheck: false` falhava
+ * no `tsc` com TS2307. Um `FastifyInstance` real (Fastify 4 e 5) é atribuível a ele.
+ */
+export type FastifyInstanceLike = { register: (...args: never[]) => unknown };
+
+/**
  * Options for {@link StackTrace.auto}: same as {@link StackTraceInitOptions} plus optional framework clients
  * (registered after `init`, without coupling the core package to those types at import time).
  */
 export type StackTraceAutoOptions = StackTraceInitOptions & {
   /** When set, registers `cc-stacktracer/fastify` on this instance. */
-  fastify?: import('fastify').FastifyInstance;
+  fastify?: FastifyInstanceLike;
   /**
    * Prisma Client — registers `cc-stacktracer/db-prisma` when installed.
    * On **Prisma 6+**, `prisma.$use` was removed: omit this and apply

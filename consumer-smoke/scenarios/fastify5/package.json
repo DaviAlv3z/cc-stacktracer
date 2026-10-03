@@ -1,0 +1,14 @@
+{
+  "name": "smoke-fastify5",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "smoke": "node main.mjs"
+  },
+  "dependencies": {
+    "fastify": "^5.8.5"
+  },
+  "smoke": {
+    "minNode": "20.0.0"
+  }
+}

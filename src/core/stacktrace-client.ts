@@ -14,11 +14,14 @@ import type { SdkSpanRow } from './span-payload.types.js';
 import { EventQueue } from './transport/event-queue.js';
 import { SpanQueue } from './transport/span-queue.js';
 import { sendWithFetch } from './transport/default-fetch-transport.js';
+import { DeliveryCancelled } from './transport/delivery-cancelled.js';
+import { createDeliveryWarnings, type DropInfo } from './transport/delivery-warnings.js';
 import { IngestTransportError } from './transport/ingest-transport-error.js';
 import { signIngestionRequest } from './transport/ingestion-signing.js';
 import { toJsonSafe } from './transport/json-safe.js';
 import { sanitizeSpanRow } from './transport/span-row-sanitize.js';
-import { isTelemetryActive, reportInternalFailure } from './safe-run.js';
+import { isTelemetryActive, reportInternalFailure, safeRun } from './safe-run.js';
+import { DEFAULT_TRUSTED_PROXIES, type ResolvedClientIpOptions } from '../utils/client-ip.js';
 
 const DEFAULT_MAX_BATCH_SIZE = 50;
 const DEFAULT_FLUSH_INTERVAL_MS = 5000;
@@ -81,6 +84,23 @@ async function ingestTransportErrorFromResponse(response: Response, message: str
   });
 }
 
+/**
+ * `rejectedIndexes` do 202: a ingestão aceita o lote e recusa itens soltos — inclusive TODOS os spans de um
+ * `serviceId` de outro projeto. Até a 3.2 o SDK nem lia a resposta, e essa perda era invisível. Lê o corpo
+ * sempre (também libera a conexão para reuso); resposta que não é JSON conta como nada recusado.
+ */
+async function rejectedItems(response: Response): Promise<{ count: number; detail?: string }> {
+  try {
+    const body = (await response.json()) as { data?: { rejectedIndexes?: unknown } } | null;
+    const list = body?.data?.rejectedIndexes;
+    if (!Array.isArray(list) || list.length === 0) return { count: 0 };
+    const first = list[0] as { message?: unknown } | undefined;
+    return { count: list.length, ...(typeof first?.message === 'string' ? { detail: first.message } : {}) };
+  } catch {
+    return { count: 0 };
+  }
+}
+
 /** Payload passed to a custom `transport` for each delivered batch. */
 export type BatchTransportPayload =
   | { kind: 'batch'; events: StackTraceEvent[] }
@@ -93,6 +113,16 @@ export class StackTraceClient {
   private readonly serviceDescriptor: ServiceDescriptor;
   private readonly capturePolicyCache: CapturePolicyCache | null;
   private readonly captureGate: CaptureGate | null;
+  /** Cancela os envios em andamento quando vence o prazo do shutdown/saída. Trocado a cada cancelamento. */
+  private inFlight = new AbortController();
+  /** Muda a cada cancelamento: um flush que começou antes dele não segue para a próxima fila. */
+  private deliveryEpoch = 0;
+  /** Itens aceitos nas filas desde a criação; só cresce. O flush de saída usa para não repetir tentativa. */
+  private acceptedCount = 0;
+  /** Aviso de perda (H2): um por tipo. Também usado pelo aviso de saída e pelo 202 com itens recusados. */
+  private readonly reportDrop: (info: DropInfo) => void;
+  /** Última falha de entrega (não cancelamento): o aviso de perda na saída diz o porquê. */
+  private lastDeliveryError: unknown = undefined;
 
   constructor(config: ParsedStackTraceInit) {
     this.config = config;
@@ -125,12 +155,25 @@ export class StackTraceClient {
       this.capturePolicyCache = null;
       this.captureGate = null;
     }
+    const reportDrop = createDeliveryWarnings({
+      endpoint: config.endpoint,
+      warn: (message) => {
+        if (config.logger?.warn !== undefined) config.logger.warn({}, message);
+        else console.warn(message);
+      },
+    });
+    // A fila só conta o que perdeu; o aviso é do cliente. Um logger que lança não pode quebrar a fila.
+    const onDrop = (info: DropInfo): void => {
+      safeRun('client.deliveryWarning', () => reportDrop(info));
+    };
+    this.reportDrop = onDrop;
     this.queue = new EventQueue({
       sendMode: config.sendMode,
       maxBatchSize: Math.min(config.maxBatchSize ?? DEFAULT_MAX_BATCH_SIZE, SERVER_MAX_EVENTS_PER_BATCH),
       flushIntervalMs: config.flushIntervalMs ?? DEFAULT_FLUSH_INTERVAL_MS,
       maxQueueSize: config.maxQueueSize ?? DEFAULT_MAX_QUEUE_SIZE,
       deliver: (batch) => this.deliverBatch(batch),
+      onDrop,
     });
     this.spanQueue = new SpanQueue({
       sendMode: config.sendMode,
@@ -138,6 +181,7 @@ export class StackTraceClient {
       flushIntervalMs: config.flushIntervalMs ?? DEFAULT_FLUSH_INTERVAL_MS,
       maxQueueSize: config.maxQueueSize ?? DEFAULT_MAX_SPAN_QUEUE_SIZE,
       deliver: (batch) => this.deliverSpanBatch(batch),
+      onDrop,
     });
   }
 
@@ -150,6 +194,7 @@ export class StackTraceClient {
         return;
       }
       this.spanQueue.enqueue(this.attachLegacySpanScope(this.withJsonSafeAttributes(sanitizeSpanRow(row))));
+      this.acceptedCount += 1;
     } catch (err) {
       reportInternalFailure('client.enqueueSpan', err);
     }
@@ -177,6 +222,7 @@ export class StackTraceClient {
         return;
       }
       this.queue.enqueue(this.attachCommonContext(next));
+      this.acceptedCount += 1;
     } catch (err) {
       reportInternalFailure('client.enqueue', err);
     }
@@ -245,9 +291,47 @@ export class StackTraceClient {
     return scoped;
   }
 
-  async flush(): Promise<void> {
-    await this.queue.flushPending();
-    await this.spanQueue.flushPending();
+  async flush(options?: { ignoreBackoff?: boolean }): Promise<void> {
+    const epoch = this.deliveryEpoch;
+    await this.queue.flushPending(options);
+    // Prazo vencido no meio do flush (`abortInFlight`): não começa o envio dos spans.
+    if (epoch !== this.deliveryEpoch) return;
+    await this.spanQueue.flushPending(options);
+  }
+
+  /** Há telemetria ainda não entregue (fila ou envio `immediate` em andamento). */
+  hasPendingDelivery(): boolean {
+    return this.queue.pendingCount() > 0 || this.spanQueue.pendingCount() > 0;
+  }
+
+  acceptedSequence(): number {
+    return this.acceptedCount;
+  }
+
+  /**
+   * Avisa (uma vez) a telemetria que ainda está na fila: chamado no fim do `shutdown()` e no evento `exit`.
+   * O que fica aqui é perdido — até a 3.2, sem uma linha no console.
+   */
+  reportUnsent(): void {
+    const count = this.queue.pendingCount() + this.spanQueue.pendingCount();
+    if (count === 0) return;
+    this.reportDrop({
+      count,
+      reason: 'unsent',
+      ...(this.lastDeliveryError !== undefined ? { error: this.lastDeliveryError } : {}),
+    });
+  }
+
+  /**
+   * Cancela os envios em andamento e o resto do flush em curso. Chamado quando o prazo do `shutdown()` ou
+   * da saída do processo vence com um envio pendurado (ingestão que aceita a conexão e não responde): sem
+   * isto o socket segurava o processo até o timeout do transporte (10 s), depois de o shutdown "terminar".
+   */
+  abortInFlight(): void {
+    this.deliveryEpoch += 1;
+    const current = this.inFlight;
+    this.inFlight = new AbortController();
+    current.abort(new DeliveryCancelled());
   }
 
   /**
@@ -290,11 +374,21 @@ export class StackTraceClient {
     };
   }
 
+  getClientIpOptions(): ResolvedClientIpOptions {
+    const option = this.config.clientIp;
+    return {
+      enabled: option?.enabled === true,
+      header: option?.header?.trim().toLowerCase(),
+      trustedProxies: option?.trustedProxies ?? DEFAULT_TRUSTED_PROXIES,
+    };
+  }
+
   async shutdown(): Promise<void> {
     this.capturePolicyCache?.stop();
     this.queue.stop();
     this.spanQueue.stop();
-    await this.flush();
+    // Última chance: tenta agora, mesmo dentro do backoff de uma falha passageira anterior (A).
+    await this.flush({ ignoreBackoff: true });
   }
 
   getService(): string {
@@ -311,30 +405,40 @@ export class StackTraceClient {
   }
 
   private async deliverBatch(batch: StackTraceEvent[]): Promise<void> {
+    const signal = this.inFlight.signal;
     try {
       if (this.config.transport) {
         const payload: BatchTransportPayload = { kind: 'batch', events: batch };
         await this.config.transport(payload);
         return;
       }
-      await this.sendDefaultIngest(batch);
+      await this.sendDefaultIngest(batch, signal);
     } catch (err: unknown) {
-      this.notifyTransportError(err);
+      // Cancelado pelo prazo de shutdown/saída: não é falha de entrega, não vai para `onTransportError`.
+      if (!signal.aborted) {
+        this.lastDeliveryError = err;
+        this.notifyTransportError(err);
+      }
       // Re-throw so the queue knows delivery failed and keeps items for retry.
       throw err;
     }
   }
 
   private async deliverSpanBatch(batch: SdkSpanRow[]): Promise<void> {
+    const signal = this.inFlight.signal;
     try {
       if (this.config.transport) {
         const payload: BatchTransportPayload = { kind: 'spans', spans: batch };
         await this.config.transport(payload);
         return;
       }
-      await this.sendDefaultSpans(batch);
+      await this.sendDefaultSpans(batch, signal);
     } catch (err: unknown) {
-      this.notifyTransportError(err);
+      // Cancelado pelo prazo de shutdown/saída: não é falha de entrega, não vai para `onTransportError`.
+      if (!signal.aborted) {
+        this.lastDeliveryError = err;
+        this.notifyTransportError(err);
+      }
       throw err;
     }
   }
@@ -352,6 +456,15 @@ export class StackTraceClient {
     }
   }
 
+  private reportRejectedItems(rejected: { count: number; detail?: string }): void {
+    if (rejected.count === 0) return;
+    this.reportDrop({
+      count: rejected.count,
+      reason: 'partial',
+      ...(rejected.detail !== undefined ? { detail: rejected.detail } : {}),
+    });
+  }
+
   /** Um callback que lança não pode substituir o erro original: um 401 permanente viraria retry eterno. */
   private notifyTransportError(err: unknown): void {
     try {
@@ -361,7 +474,7 @@ export class StackTraceClient {
     }
   }
 
-  private async sendDefaultIngest(batch: StackTraceEvent[]): Promise<void> {
+  private async sendDefaultIngest(batch: StackTraceEvent[], signal: AbortSignal): Promise<void> {
     const base = this.config.endpoint.replace(/\/$/, '');
     const url = `${base}${DEFAULT_INGEST_PATH}`;
     const signPath = ingestPathForSignature(url, DEFAULT_INGEST_PATH);
@@ -387,6 +500,7 @@ export class StackTraceClient {
         canonical.push(normalizeEventV4(item, normalizeOpts));
       } catch (err) {
         reportInternalFailure('client.normalizeEvent', err);
+        this.reportDrop({ count: 1, reason: 'invalid', error: err });
       }
     }
     if (canonical.length === 0) {
@@ -403,13 +517,14 @@ export class StackTraceClient {
         serializedBody: body,
       }),
     };
-    const response = await sendWithFetch({ url, headers, body });
+    const response = await sendWithFetch({ url, headers, body, signal });
     if (!response.ok) {
       throw await ingestTransportErrorFromResponse(response, `ingest failed with status ${response.status}`);
     }
+    this.reportRejectedItems(await rejectedItems(response));
   }
 
-  private async sendDefaultSpans(spans: SdkSpanRow[]): Promise<void> {
+  private async sendDefaultSpans(spans: SdkSpanRow[], signal: AbortSignal): Promise<void> {
     const base = this.config.endpoint.replace(/\/$/, '');
     const url = `${base}${DEFAULT_SPANS_PATH}`;
     const signPath = ingestPathForSignature(url, DEFAULT_SPANS_PATH);
@@ -424,10 +539,11 @@ export class StackTraceClient {
         serializedBody: body,
       }),
     };
-    const response = await sendWithFetch({ url, headers, body });
+    const response = await sendWithFetch({ url, headers, body, signal });
     if (!response.ok) {
       throw await ingestTransportErrorFromResponse(response, `span ingest failed with status ${response.status}`);
     }
+    this.reportRejectedItems(await rejectedItems(response));
   }
 }
 

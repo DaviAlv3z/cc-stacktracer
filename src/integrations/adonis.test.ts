@@ -1,7 +1,10 @@
+import { hostname } from 'node:os';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { resetFailOpenState } from '../core/safe-run.js';
 import { createStackTraceClient, init, shutdown } from '../index.js';
 import type { BatchTransportPayload } from '../core/stacktrace-client.js';
+import type { SdkSpanRow } from '../core/span-payload.types.js';
+import { SDK_VERSION } from '../core/sdk-version.js';
 import { stacktraceAdonisMiddleware, type AdonisHttpContextLike } from './adonis.js';
 
 const serviceId = '11111111-1111-4111-8111-111111111111';
@@ -335,5 +338,109 @@ describe('Adonis Error Tracking (3.0)', () => {
     const span = payloads(transport).find((p) => p.kind === 'spans')?.spans[0];
     expect(span).toMatchObject({ status: 'ok', error_type: null, http_status_code: 404 });
     expect(payloads(transport).some((p) => p.kind === 'batch')).toBe(false);
+  });
+});
+
+describe('Adonis: identidade no span raiz', () => {
+  const IDENTITY = { 'host.name': hostname(), 'process.pid': process.pid, 'telemetry.sdk.version': SDK_VERSION };
+
+  function clientWith(transport: ReturnType<typeof vi.fn>, extra: Record<string, unknown> = {}) {
+    return createStackTraceClient({
+      apiKey: 'k',
+      serviceId,
+      endpoint: 'https://ingest.example.com',
+      sendMode: 'immediate',
+      transport,
+      ...extra,
+    });
+  }
+
+  function ctxWith(
+    headers: Record<string, string>,
+    params: { handlers?: Record<string, () => void>; pattern?: string; url?: string } = {},
+  ): AdonisHttpContextLike {
+    return {
+      request: {
+        method: () => 'GET',
+        url: () => params.url ?? '/ping',
+        headers: () => headers,
+        request: { socket: { remoteAddress: '::ffff:127.0.0.1' } },
+      },
+      response: {
+        response: {
+          statusCode: params.pattern === undefined ? 404 : 200,
+          on: (event: string, cb: () => void) => {
+            if (params.handlers !== undefined) params.handlers[event] = cb;
+          },
+        },
+      },
+      ...(params.pattern !== undefined ? { route: { pattern: params.pattern } } : {}),
+    };
+  }
+
+  async function rootSpanOf(
+    client: ReturnType<typeof clientWith>,
+    transport: ReturnType<typeof vi.fn>,
+    ctx: AdonisHttpContextLike,
+    handlers: Record<string, () => void>,
+    end: 'finish' | 'close' = 'finish',
+  ) {
+    await stacktraceAdonisMiddleware({ client })(ctx, vi.fn().mockResolvedValue(undefined));
+    handlers[end]!();
+    await vi.waitFor(() => expect(transport.mock.calls.some((c) => c[0]?.kind === 'spans')).toBe(true));
+    return (transport.mock.calls.find((c) => c[0]?.kind === 'spans')![0] as { spans: SdkSpanRow[] }).spans[0]!;
+  }
+
+  it('user-agent, request id, host, pid e versao do SDK; sem IP por padrao', async () => {
+    const transport = vi.fn().mockResolvedValue(undefined);
+    const handlers: Record<string, () => void> = {};
+    const ctx = ctxWith({ 'user-agent': 'Mozilla/5.0 (smoke)', 'request-id': 'rid-1' }, { handlers, pattern: '/ping' });
+    const span = await rootSpanOf(clientWith(transport), transport, ctx, handlers);
+    expect(span.attributes).toEqual({
+      ...IDENTITY,
+      'user_agent.original': 'Mozilla/5.0 (smoke)',
+      'http.request_id': 'rid-1',
+    });
+  });
+
+  it('com clientIp ligado: o loopback do socket cru, normalizado', async () => {
+    const transport = vi.fn().mockResolvedValue(undefined);
+    const handlers: Record<string, () => void> = {};
+    const client = clientWith(transport, { clientIp: { enabled: true } });
+    const span = await rootSpanOf(client, transport, ctxWith({}, { handlers, pattern: '/ping' }), handlers);
+    expect(span.attributes?.['client.address']).toBe('127.0.0.1');
+  });
+
+  it('com x-forwarded-for e trustedProxies: o IP certo', async () => {
+    const transport = vi.fn().mockResolvedValue(undefined);
+    const handlers: Record<string, () => void> = {};
+    const client = clientWith(transport, { clientIp: { enabled: true, header: 'x-forwarded-for' } });
+    const ctx = ctxWith({ 'x-forwarded-for': '1.1.1.1, 203.0.113.7' }, { handlers, pattern: '/ping' });
+    const span = await rootSpanOf(client, transport, ctx, handlers);
+    expect(span.attributes?.['client.address']).toBe('203.0.113.7');
+  });
+
+  it('requisicao abortada (close): os campos continuam la', async () => {
+    const transport = vi.fn().mockResolvedValue(undefined);
+    const handlers: Record<string, () => void> = {};
+    const client = clientWith(transport, { clientIp: { enabled: true } });
+    const ctx = ctxWith({ 'user-agent': 'aborter', 'x-request-id': 'req-abort' }, { handlers, pattern: '/slow' });
+    const span = await rootSpanOf(client, transport, ctx, handlers, 'close');
+    expect(span.http_aborted).toBe(true);
+    expect(span.attributes).toEqual({
+      ...IDENTITY,
+      'user_agent.original': 'aborter',
+      'http.request_id': 'req-abort',
+      'client.address': '127.0.0.1',
+    });
+  });
+
+  it('404 [unmatched]: url.path junto dos campos novos', async () => {
+    const transport = vi.fn().mockResolvedValue(undefined);
+    const handlers: Record<string, () => void> = {};
+    const ctx = ctxWith({ 'user-agent': 'scanner' }, { handlers, url: '/.env' });
+    const span = await rootSpanOf(clientWith(transport), transport, ctx, handlers);
+    expect(span.http_route).toBe('[unmatched]');
+    expect(span.attributes).toEqual({ ...IDENTITY, 'user_agent.original': 'scanner', 'url.path': '/.env' });
   });
 });

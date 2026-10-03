@@ -11,7 +11,8 @@ export type CorrelationFields = {
   traceFlags?: string;
 };
 
-const REQUEST_ID_HEADER_NAMES = ['x-request-id', 'x-correlation-id', 'request-id'] as const;
+/** Em ordem de preferencia: o primeiro presente da o request id. */
+export const REQUEST_ID_HEADER_NAMES = ['x-request-id', 'x-correlation-id', 'request-id'] as const;
 const MAX_CORRELATION_HEADER_LENGTH = 256;
 
 function getHeaderInsensitive(headers: Record<string, string>, name: string): string | undefined {

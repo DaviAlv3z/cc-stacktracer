@@ -11,6 +11,7 @@ import { headersToRecord } from '../utils/headers.js';
 import { redactUrl } from '../utils/redact-url.js';
 import { httpRootSpanOutcome } from './http-root-span-outcome.js';
 import { httpRootSpanRoute } from './http-root-span-route.js';
+import { httpRootSpanIdentity, withRootSpanAttributes } from './http-root-span-identity.js';
 import { completeLocalRoot, recordBoundaryError } from '../core/error-tracking.js';
 import { warnRemovedCaptureErrors } from './removed-options.js';
 
@@ -57,6 +58,13 @@ function prepareRequest(req: Request, res: Response, client: StackTraceClient | 
   const traceId = correlation.traceId ?? randomBytes(16).toString('hex');
   const rootSpanId = randomBytes(8).toString('hex');
   const requestUrl = req.originalUrl ?? req.url;
+  const identity = httpRootSpanIdentity({
+    client,
+    headers,
+    rawHeaders: raw,
+    requestId: correlation.requestId,
+    socketAddress: req.socket?.remoteAddress,
+  });
 
   // Emit the root span exactly once, however the request ends. `finish` covers a
   // completed response; `close` is the fallback for aborted/timed-out connections
@@ -97,7 +105,7 @@ function prepareRequest(req: Request, res: Response, client: StackTraceClient | 
       ...httpRootSpanOutcome(aborted, res.statusCode, boundaryError),
       http_method: req.method,
       http_route: route.http_route,
-      ...(route.attributes !== undefined ? { attributes: route.attributes } : {}),
+      ...withRootSpanAttributes(identity, route.attributes),
     });
   };
 

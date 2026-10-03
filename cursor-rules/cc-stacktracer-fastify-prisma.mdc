@@ -1,7 +1,7 @@
 ---
 alwaysApply: false
-version: 0.4.1
-lastUpdated: 2026-04-29
+version: 0.5.0
+lastUpdated: 2026-10-03
 ruleset: cc-stacktracer-fastify-prisma
 extends: cc-stacktracer-core.mdc
 ---
@@ -464,7 +464,7 @@ Full JSONL payload logging is allowed in development only and must be opt-in.
 ### Prisma spans are missing
 
 1. Verify all clients are created through the instrumented factory.
-2. Verify `$extends(createStackTracePrismaQueryExtension(...))` is applied.
+2. Verify `$extends(createStackTracePrismaQueryExtension({ dbSystem: '<engine>' }))` is applied (SDK 3.3+: `dbSystem` records the real engine; without it `db_system` is `prisma`). On Prisma 7 the client needs a driver adapter (`@prisma/adapter-pg`, `@prisma/adapter-mssql`); the extension is the same.
 3. Verify operations run inside request trace context.
 4. Verify `db.system` is a real engine name.
 5. Verify capture policy allows DB spans.

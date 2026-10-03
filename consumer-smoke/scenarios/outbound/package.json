@@ -1,0 +1,8 @@
+{
+  "name": "smoke-outbound",
+  "private": true,
+  "type": "module",
+  "scripts": { "smoke": "node main.mjs" },
+  "dependencies": { "express": "^5.2.1", "axios": "^1.7.9" },
+  "smoke": { "minNode": "20.0.0" }
+}

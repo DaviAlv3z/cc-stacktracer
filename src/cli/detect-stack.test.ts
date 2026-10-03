@@ -51,4 +51,11 @@ describe('detectStack', () => {
   it('sem empate, ambiguous vem vazio', () => {
     expect(detectStack({ dependencies: { fastify: '^5.0.0' } }).ambiguous).toEqual([]);
   });
+
+  it('NestJS: @nestjs/core vence o express/fastify que vêm com ele', () => {
+    const s = detectStack({
+      dependencies: { '@nestjs/core': '^12.1.2', '@nestjs/platform-express': '^12.1.2', express: '^5.2.1' },
+    });
+    expect(s.http).toBe('nestjs');
+  });
 });

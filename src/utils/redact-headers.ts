@@ -14,6 +14,9 @@ export type RedactHeadersOptions = {
 
 const DEFAULT_MAX_HEADER_VALUE_LENGTH = 512;
 
+/** O valor que um header sensivel leva no mapa redigido. */
+export const REDACTED_HEADER_VALUE = '[REDACTED]';
+
 function truncateValue(value: string, maxLen: number): string {
   if (maxLen <= 0 || value.length <= maxLen) return value;
   return `${value.slice(0, maxLen)}…`;
@@ -34,7 +37,7 @@ export function redactHeaders(headers: Record<string, string>, options?: RedactH
   const out: Record<string, string> = {};
   for (const [key, value] of Object.entries(headers)) {
     const lower = key.toLowerCase();
-    const raw = sensitive.has(lower) ? '[REDACTED]' : value;
+    const raw = sensitive.has(lower) ? REDACTED_HEADER_VALUE : value;
     out[lower] = truncateValue(raw, maxLen);
   }
   return out;

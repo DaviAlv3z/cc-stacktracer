@@ -1,8 +1,10 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import http from 'node:http';
+import { hostname } from 'node:os';
 import type { AddressInfo } from 'node:net';
 import Fastify from 'fastify';
-import { createStackTraceClient, flush, init, runQuery, shutdown } from '../index.js';
+import { createStackTraceClient, flush, init, runQuery, shutdown, withSpan } from '../index.js';
+import { SDK_VERSION } from '../core/sdk-version.js';
 import type { BatchTransportPayload } from '../core/stacktrace-client.js';
 import type { StackTraceEvent } from '../core/stacktrace-event.types.js';
 import stacktracePlugin from './fastify.js';
@@ -312,6 +314,29 @@ describe('Fastify plugin', () => {
     await other.close();
     warn.mockRestore();
   });
+
+  it('vale para a app inteira (skip-override): rotas de plugins irmãos também têm span', async () => {
+    const transport = vi.fn().mockResolvedValue(undefined);
+    const client = createStackTraceClient({
+      apiKey: 'k',
+      serviceId,
+      service: 'svc',
+      environment: 'test',
+      endpoint: 'https://ingest.example.com',
+      sendMode: 'immediate',
+      transport,
+    });
+    const app = Fastify();
+    await app.register(stacktracePlugin, { client });
+    await app.register(async (child) => {
+      child.get('/sibling/:id', async () => ({ ok: true }));
+    });
+    expect((await app.inject({ method: 'GET', url: '/sibling/1' })).statusCode).toBe(200);
+    await vi.waitFor(() => expect(sentPayloads(transport).some((p) => p.kind === 'spans')).toBe(true));
+    const span = sentPayloads(transport).find((p) => p.kind === 'spans')?.spans[0];
+    expect(span?.http_route).toBe('/sibling/:id');
+    await app.close();
+  });
 });
 
 describe('Fastify plugin fail-open', () => {
@@ -366,5 +391,137 @@ describe('Fastify plugin fail-open', () => {
     await expect(injectPing(failOpenClient(transport))).resolves.toEqual({ statusCode: 200, body: { ok: true } });
     await new Promise<void>((resolve) => setImmediate(resolve));
     expect(transport).not.toHaveBeenCalled();
+  });
+});
+
+describe('Fastify: identidade no span raiz', () => {
+  const IDENTITY = { 'host.name': hostname(), 'process.pid': process.pid, 'telemetry.sdk.version': SDK_VERSION };
+
+  afterEach(async () => {
+    await shutdown();
+  });
+
+  function clientWith(transport: ReturnType<typeof vi.fn>, extra: Record<string, unknown> = {}): StackTraceClient {
+    return createStackTraceClient({
+      apiKey: 'k',
+      serviceId,
+      endpoint: 'https://ingest.example.com',
+      sendMode: 'immediate',
+      transport,
+      ...extra,
+    });
+  }
+
+  async function rootSpanOf(
+    client: StackTraceClient,
+    transport: ReturnType<typeof vi.fn>,
+    headers: Record<string, string>,
+    url = '/ping',
+  ) {
+    const app = Fastify();
+    await app.register(stacktracePlugin, { client });
+    app.get('/ping', async () => ({ ok: true }));
+    await app.inject({ method: 'GET', url, headers });
+    await vi.waitFor(() => expect(sentPayloads(transport).some((p) => p.kind === 'spans')).toBe(true));
+    await app.close();
+    return sentPayloads(transport).find((p) => p.kind === 'spans')!.spans[0]!;
+  }
+
+  it('user-agent, request id, host, pid e versao do SDK; sem IP por padrao', async () => {
+    const transport = vi.fn().mockResolvedValue(undefined);
+    const span = await rootSpanOf(clientWith(transport), transport, {
+      'user-agent': 'Mozilla/5.0 (smoke)',
+      'x-request-id': 'req-123',
+    });
+    expect(span.attributes).toEqual({
+      ...IDENTITY,
+      'user_agent.original': 'Mozilla/5.0 (smoke)',
+      'http.request_id': 'req-123',
+    });
+  });
+
+  it('com clientIp ligado: o endereco do socket', async () => {
+    const transport = vi.fn().mockResolvedValue(undefined);
+    const span = await rootSpanOf(clientWith(transport, { clientIp: { enabled: true } }), transport, {
+      'x-forwarded-for': '1.1.1.1',
+    });
+    expect(span.attributes?.['client.address']).toBe('127.0.0.1');
+  });
+
+  it('com x-forwarded-for e trustedProxies: a entrada do proxy, nao a forjada', async () => {
+    const transport = vi.fn().mockResolvedValue(undefined);
+    const client = clientWith(transport, {
+      clientIp: { enabled: true, header: 'x-forwarded-for', trustedProxies: 1 },
+    });
+    const span = await rootSpanOf(client, transport, { 'x-forwarded-for': '1.1.1.1, 203.0.113.7' });
+    expect(span.attributes?.['client.address']).toBe('203.0.113.7');
+  });
+
+  it('404 [unmatched]: url.path junto dos campos novos', async () => {
+    const transport = vi.fn().mockResolvedValue(undefined);
+    const span = await rootSpanOf(clientWith(transport), transport, { 'user-agent': 'scanner' }, '/.env');
+    expect(span.http_route).toBe('[unmatched]');
+    expect(span.attributes).toEqual({ ...IDENTITY, 'user_agent.original': 'scanner', 'url.path': '/.env' });
+  });
+
+  it('requisicao abortada (close): os campos continuam la', async () => {
+    const transport = vi.fn().mockResolvedValue(undefined);
+    const app = Fastify({ forceCloseConnections: true });
+    await app.register(stacktracePlugin, {
+      client: clientWith(transport, { clientIp: { enabled: true } }),
+    });
+    app.get('/slow', async () => {
+      await new Promise<void>((resolve) => setTimeout(resolve, 5000).unref());
+      return { ok: true };
+    });
+    await app.listen({ port: 0, host: '127.0.0.1' });
+    const { port } = app.server.address() as AddressInfo;
+    await new Promise<void>((resolve) => {
+      const req = http.request({
+        host: '127.0.0.1',
+        port,
+        path: '/slow',
+        headers: { 'user-agent': 'aborter', 'x-request-id': 'req-abort' },
+      });
+      req.on('error', () => resolve());
+      req.end();
+      setTimeout(() => req.destroy(), 100);
+    });
+    await vi.waitFor(() => expect(sentPayloads(transport).some((p) => p.kind === 'spans')).toBe(true));
+    const span = sentPayloads(transport).find((p) => p.kind === 'spans')!.spans[0]!;
+    expect(span.http_aborted).toBe(true);
+    expect(span.attributes).toEqual({
+      ...IDENTITY,
+      'user_agent.original': 'aborter',
+      'http.request_id': 'req-abort',
+      'client.address': '127.0.0.1',
+    });
+    await app.close();
+  });
+
+  it('withSpan filho dentro do handler: nenhum dos campos novos', async () => {
+    const transport = vi.fn().mockResolvedValue(undefined);
+    init({
+      apiKey: 'k',
+      serviceId,
+      endpoint: 'https://ingest.example.com',
+      sendMode: 'immediate',
+      transport,
+      clientIp: { enabled: true },
+    });
+    const app = Fastify();
+    await app.register(stacktracePlugin);
+    app.get('/work', async () => withSpan('child.work', async () => 'ok', { attributes: { step: 1 } }));
+    await app.inject({ method: 'GET', url: '/work', headers: { 'user-agent': 'ua', 'x-request-id': 'r' } });
+    await vi.waitFor(() =>
+      expect(sentPayloads(transport).flatMap((p) => (p.kind === 'spans' ? p.spans : []))).toHaveLength(2),
+    );
+    await app.close();
+    const spans = sentPayloads(transport).flatMap((p) => (p.kind === 'spans' ? p.spans : []));
+    const child = spans.find((s) => s.span_name === 'child.work');
+    const root = spans.find((s) => s.span_type === 'http');
+    expect(root?.attributes?.['user_agent.original']).toBe('ua');
+    expect(child?.parent_span_id).toBe(root?.span_id);
+    expect(child?.attributes).toEqual({ step: 1 });
   });
 });

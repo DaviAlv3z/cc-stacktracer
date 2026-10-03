@@ -15,7 +15,12 @@ route hand-building its own JSON.
 npm install cc-stacktracer
 ```
 
-Requires Node.js 18 or newer. TypeScript types are bundled.
+Requires Node.js 20 or newer. TypeScript types are bundled (TypeScript 5.5+).
+
+**CommonJS projects** (NestJS, TypeScript compiled to CommonJS): cc-stacktracer is an ES module, so
+`require()` needs Node.js 20.19+ or 22.12+, and TypeScript must use `"module": "nodenext"` (5.8+) or
+`"node20"` (5.9+). The older `"moduleResolution": "node"` (NestJS 10/11) also works, up to TypeScript 6.0.
+`npx cc-stacktracer doctor` checks this.
 
 ---
 

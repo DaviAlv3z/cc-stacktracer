@@ -1,0 +1,14 @@
+{
+  "name": "smoke-adonis620",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "smoke": "node main.mjs"
+  },
+  "dependencies": {
+    "@adonisjs/core": "6.2.0"
+  },
+  "smoke": {
+    "minNode": "20.6.0"
+  }
+}

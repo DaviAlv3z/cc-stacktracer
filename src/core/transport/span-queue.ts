@@ -1,6 +1,7 @@
 import type { SdkSpanRow } from '../span-payload.types.js';
 import { runDetached } from '../safe-run.js';
 import { chunkBatches } from './batch-sender.js';
+import type { DropInfo } from './delivery-warnings.js';
 import { isPermanentIngestError } from './ingest-transport-error.js';
 import {
   DEFAULT_MAX_DELIVERY_ATTEMPTS,
@@ -23,6 +24,8 @@ export type SpanQueueOptions = {
   retryBackoff?: QueueRetryBackoffOptions;
   /** Tentativas do lote da frente antes de descartá-lo. Default {@link DEFAULT_MAX_DELIVERY_ATTEMPTS}. */
   maxDeliveryAttempts?: number;
+  /** Itens descartados sem entrega (erro permanente, tentativas esgotadas, fila cheia). O cliente avisa. */
+  onDrop?: (info: DropInfo) => void;
 };
 
 export type SpanQueueMetricName =
@@ -60,6 +63,8 @@ export class SpanQueue {
   private drainAllRequested = false;
   private flushSequence = 0;
   private retryTimer: ReturnType<typeof setTimeout> | null = null;
+  /** Depois de `stop()` (shutdown, re-init) a fila não arma timer nenhum: o cliente antigo não volta a enviar sozinho. */
+  private stopped = false;
   private retryNotBefore = 0;
   private consecutiveFailures = 0;
   private headAttempts = 0;
@@ -77,6 +82,7 @@ export class SpanQueue {
 
     if (this.options.maxQueueSize !== undefined && this.queue.length >= this.options.maxQueueSize) {
       this.queue.shift();
+      this.options.onDrop?.({ count: 1, reason: 'overflow' });
     }
 
     this.queue.push(row);
@@ -87,14 +93,16 @@ export class SpanQueue {
 
   private deliverImmediately(row: SdkSpanRow): void {
     if (this.inFlightImmediate >= MAX_IN_FLIGHT_IMMEDIATE) {
+      this.options.onDrop?.({ count: 1, reason: 'overflow' });
       return;
     }
     this.inFlightImmediate += 1;
     const send = (async () => {
       try {
         await this.options.deliver([row]);
-      } catch {
-        // falha de transporte, não do SDK: `onTransportError` já foi avisado dentro de `deliver`
+      } catch (err) {
+        // Sem retry no modo immediate: o item falhou de vez. `onTransportError` já foi avisado em `deliver`.
+        this.options.onDrop?.({ count: 1, reason: isPermanentIngestError(err) ? 'rejected' : 'exhausted', error: err });
       } finally {
         this.inFlightImmediate -= 1;
       }
@@ -103,18 +111,28 @@ export class SpanQueue {
     runDetached('spanQueue.deliverImmediate', () => send.finally(() => this.immediateSends.delete(send)));
   }
 
-  async flushPending(): Promise<void> {
+  /** Itens ainda não entregues: os da fila e os envios `immediate` em andamento. */
+  pendingCount(): number {
+    return this.queue.length + this.immediateSends.size;
+  }
+
+  async flushPending(options?: { ignoreBackoff?: boolean }): Promise<void> {
     if (this.options.sendMode === 'immediate') {
       // Sem isto `flush()`/`shutdown()` voltavam na hora e o processo saía com os envios no ar —
       // inclusive o evento de crash dos handlers globais, antes do `process.exit`.
       await Promise.allSettled([...this.immediateSends]);
       return;
     }
+    if (options?.ignoreBackoff === true) {
+      // Última chance (saída do processo): uma tentativa agora, mesmo dentro do backoff de uma falha anterior.
+      this.retryNotBefore = 0;
+    }
     this.emitMetric('spanqueue_shutdown_flush_total', 1);
     await this.runFlush(true);
   }
 
   stop(): void {
+    this.stopped = true;
     if (this.intervalHandle !== null) {
       clearInterval(this.intervalHandle);
       this.intervalHandle = null;
@@ -123,6 +141,9 @@ export class SpanQueue {
   }
 
   private ensureInterval(): void {
+    if (this.stopped) {
+      return;
+    }
     if (this.options.sendMode !== 'batch') {
       return;
     }
@@ -245,9 +266,11 @@ export class SpanQueue {
           'spanqueue_flush_failed',
         );
         this.headAttempts += 1;
-        if (isPermanentIngestError(err) || this.headAttempts >= maxAttempts) {
+        const permanent = isPermanentIngestError(err);
+        if (permanent || this.headAttempts >= maxAttempts) {
           this.headAttempts = 0;
           delivered += chunk.length;
+          this.options.onDrop?.({ count: chunk.length, reason: permanent ? 'rejected' : 'exhausted', error: err });
           continue;
         }
         this.scheduleRetry(err);
@@ -277,6 +300,9 @@ export class SpanQueue {
       ...(this.options.retryBackoff !== undefined ? { options: this.options.retryBackoff } : {}),
     });
     this.retryNotBefore = Date.now() + delayMs;
+    if (this.stopped) {
+      return;
+    }
     this.retryTimer = resetQueueRetryTimer(this.retryTimer);
     this.retryTimer = setTimeout(() => {
       this.retryTimer = null;

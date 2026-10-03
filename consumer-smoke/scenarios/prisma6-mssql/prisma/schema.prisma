@@ -1,0 +1,13 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlserver"
+  url      = env("DATABASE_URL")
+}
+
+model SmokeUser {
+  id    Int    @id @default(autoincrement())
+  email String @unique @db.VarChar(120)
+}

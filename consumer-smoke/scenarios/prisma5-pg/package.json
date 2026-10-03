@@ -1,0 +1,19 @@
+{
+  "name": "smoke-prisma5-pg",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "smoke": "node main.mjs"
+  },
+  "dependencies": {
+    "prisma": "5.0.0",
+    "@prisma/client": "5.0.0"
+  },
+  "smoke": {
+    "minNode": "20.19.0",
+    "services": [
+      "postgres"
+    ],
+    "timeoutMs": 300000
+  }
+}

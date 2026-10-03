@@ -22,6 +22,14 @@ type PrismaExtensionOperation = {
   query: (args: unknown) => Promise<unknown>;
 };
 
+export type StackTracePrismaExtensionOptions = {
+  /**
+   * Engine real do banco (`postgres`, `mysql`, `sqlserver`, `sqlite`) — o `db_system` do span. Sem a
+   * opção o span sai com `prisma`, como até a 3.2, para não quebrar o histórico de quem já usa.
+   */
+  dbSystem?: string;
+};
+
 /**
  * Prisma Client extension for DB spans (Prisma 4.16+ client extensions).
  *
@@ -29,14 +37,15 @@ type PrismaExtensionOperation = {
  * importing `cc-stacktracer/db-prisma` must not require `@prisma/client` unless
  * the application itself already uses Prisma and passes this object to `$extends`.
  */
-export function createStackTracePrismaQueryExtension() {
+export function createStackTracePrismaQueryExtension(options: StackTracePrismaExtensionOptions = {}) {
+  const system = options.dbSystem ?? 'prisma';
   return {
     name: 'cc-stacktracer-query',
     query: {
       $allModels: {
         async $allOperations({ model, operation, args, query }: PrismaExtensionOperation) {
           const table = model !== undefined && model !== '' ? model : 'raw';
-          return runQuery('prisma', `${table}.${operation}`, () => query(args), {
+          return runQuery(system, `${table}.${operation}`, () => query(args), {
             table,
             sqlVerb: operation,
             leaf: true,
@@ -44,13 +53,13 @@ export function createStackTracePrismaQueryExtension() {
         },
       },
       $executeRaw: async ({ args, query }: PrismaExtensionOperation) =>
-        runQuery('prisma', '$executeRaw', () => query(args), { table: 'raw', sqlVerb: 'EXECUTE', leaf: true }),
+        runQuery(system, '$executeRaw', () => query(args), { table: 'raw', sqlVerb: 'EXECUTE', leaf: true }),
       $executeRawUnsafe: async ({ args, query }: PrismaExtensionOperation) =>
-        runQuery('prisma', '$executeRawUnsafe', () => query(args), { table: 'raw', sqlVerb: 'EXECUTE', leaf: true }),
+        runQuery(system, '$executeRawUnsafe', () => query(args), { table: 'raw', sqlVerb: 'EXECUTE', leaf: true }),
       $queryRaw: async ({ args, query }: PrismaExtensionOperation) =>
-        runQuery('prisma', '$queryRaw', () => query(args), { table: 'raw', sqlVerb: 'SELECT', leaf: true }),
+        runQuery(system, '$queryRaw', () => query(args), { table: 'raw', sqlVerb: 'SELECT', leaf: true }),
       $queryRawUnsafe: async ({ args, query }: PrismaExtensionOperation) =>
-        runQuery('prisma', '$queryRawUnsafe', () => query(args), { table: 'raw', sqlVerb: 'SELECT', leaf: true }),
+        runQuery(system, '$queryRawUnsafe', () => query(args), { table: 'raw', sqlVerb: 'SELECT', leaf: true }),
     },
   };
 }
@@ -77,11 +86,10 @@ export function createPrismaStackTracePlugin(prisma: PrismaMiddlewareClient): St
         return;
       }
 
-      if (typeof process !== 'undefined' && process.env.NODE_ENV !== 'production') {
-        console.warn(
-          '[cc-stacktracer] Prisma 6+ removed prisma.$use(). Instrument DB queries with Client Extensions: `new PrismaClient().$extends(createStackTracePrismaQueryExtension())`. See `cc-stacktracer/db-prisma`.',
-        );
-      }
+      // Em qualquer ambiente: em produção o silêncio escondia que nenhuma query virava span.
+      console.warn(
+        "[cc-stacktracer] Prisma 6.14+ removed prisma.$use(). Instrument DB queries with Client Extensions: `new PrismaClient().$extends(createStackTracePrismaQueryExtension({ dbSystem: 'postgres' }))`. See `cc-stacktracer/db-prisma`.",
+      );
     },
   };
 }

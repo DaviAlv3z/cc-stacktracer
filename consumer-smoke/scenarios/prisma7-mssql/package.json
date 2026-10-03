@@ -1,0 +1,20 @@
+{
+  "name": "smoke-prisma7-mssql",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "smoke": "node main.mjs"
+  },
+  "dependencies": {
+    "prisma": "^7.10.0",
+    "@prisma/client": "^7.10.0",
+    "@prisma/adapter-mssql": "^7.10.0"
+  },
+  "smoke": {
+    "minNode": "20.19.0",
+    "services": [
+      "mssql"
+    ],
+    "timeoutMs": 300000
+  }
+}

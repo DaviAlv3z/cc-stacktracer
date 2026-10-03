@@ -28,13 +28,33 @@ function httpExtra(http: HttpStack | null): string[] {
     case 'fastify':
       return ['', '  fastify: app, // registra o plugin HTTP e instrumenta toda requisicao'];
     case 'adonis':
-      // Adonis nao expoe a app no boot como o Fastify: o middleware entra na stack de rotas.
-      return ['', '  // Adonis: registre stacktraceAdonisMiddleware() na stack de middleware de rotas'];
+      // O Adonis não entrega a app no boot: o middleware vai em start/kernel.ts, e o erro no handler.
+      return [
+        '',
+        "  // Adonis: em start/kernel.ts, server.use([() => import('cc-stacktracer/adonis/middleware'), ...])",
+        '  // e, no report() do exception handler, StackTrace.recordRequestError(error)',
+      ];
     case 'express':
-      return ['', '  // Express: app.use(stacktraceExpressMiddleware()) depois deste init'];
+      return [
+        '',
+        "  // Express: import { stacktraceExpressMiddleware, stacktraceErrorMiddleware } from 'cc-stacktracer/express'",
+        '  // app.use(stacktraceExpressMiddleware()) ANTES das rotas e app.use(stacktraceErrorMiddleware()) DEPOIS delas',
+      ];
+    case 'nestjs':
+      // O Nest trata a exceção nos próprios filtros, antes do Express: sem o filtro, o 5xx não vira evento.
+      return [
+        '',
+        '  // NestJS: em main.ts, antes do NestFactory.create; depois nestApp.use(stacktraceExpressMiddleware()) (cc-stacktracer/express)',
+        '  // e um filtro global @Catch() que chama StackTrace.recordRequestError(exception) antes do super.catch()',
+      ];
     default:
       return [];
   }
+}
+
+/** Campos de banco que entram no próprio `auto`. */
+function dbAutoExtra(db: DbStack | null): string[] {
+  return db === 'lucid' ? ["  lucid: db, // import db from '@adonisjs/lucid/services/db' — span de toda query"] : [];
 }
 
 function dbHint(db: DbStack | null): string[] {
@@ -42,17 +62,12 @@ function dbHint(db: DbStack | null): string[] {
     case 'prisma':
       return [
         '',
-        '// Prisma: o plugin oficial instrumenta toda query como span `db`.',
-        "import { createPrismaStackTracePlugin } from 'cc-stacktracer/db-prisma';",
-        'StackTrace.register(createPrismaStackTracePlugin(prisma));',
+        '// Prisma: a extensão oficial instrumenta toda operação como span `db`.',
+        "import { createStackTracePrismaQueryExtension } from 'cc-stacktracer/db-prisma';",
+        "const prisma = new PrismaClient().$extends(createStackTracePrismaQueryExtension({ dbSystem: 'postgres' }));",
       ];
     case 'lucid':
-      return [
-        '',
-        '// Lucid/Knex: instrumentacao global pelo subpath dedicado.',
-        "import { createLucidStackTracePlugin } from 'cc-stacktracer/db-lucid';",
-        'StackTrace.register(createLucidStackTracePlugin(db));',
-      ];
+      return [];
     default:
       return [
         '',
@@ -63,7 +78,9 @@ function dbHint(db: DbStack | null): string[] {
 }
 
 export function buildInitSnippet(stack: Pick<DetectedStack, 'http' | 'db'>): string {
-  return [IMPORT_LINE, '', autoBlock(httpExtra(stack.http)), ...dbHint(stack.db)].join('\n');
+  return [IMPORT_LINE, '', autoBlock([...httpExtra(stack.http), ...dbAutoExtra(stack.db)]), ...dbHint(stack.db)].join(
+    '\n',
+  );
 }
 
 /**

@@ -214,3 +214,30 @@ describe('opcoes do Error Tracking', () => {
     expect(() => parseStackTraceInit({ ...base, httpClientErrorStatuses: '500-' })).toThrow(/100 to 599/);
   });
 });
+
+describe('opcao clientIp', () => {
+  const base = { apiKey: 'k', serviceId, endpoint: 'https://ingest.example.com' };
+
+  it('aceita clientIp com header e trustedProxies', () => {
+    const parsed = parseStackTraceInit({
+      ...base,
+      clientIp: { enabled: true, header: 'x-forwarded-for', trustedProxies: 2 },
+    });
+    expect(parsed.clientIp).toEqual({ enabled: true, header: 'x-forwarded-for', trustedProxies: 2 });
+    expect(parseStackTraceInit({ ...base, clientIp: {} }).clientIp).toEqual({});
+  });
+
+  it('rejeita trustedProxies 0 e nao inteiro', () => {
+    expect(() => parseStackTraceInit({ ...base, clientIp: { enabled: true, trustedProxies: 0 } })).toThrow(
+      /trustedProxies/,
+    );
+    expect(() => parseStackTraceInit({ ...base, clientIp: { enabled: true, trustedProxies: 1.5 } })).toThrow(
+      /trustedProxies/,
+    );
+  });
+
+  it('rejeita header vazio e chave desconhecida dentro de clientIp', () => {
+    expect(() => parseStackTraceInit({ ...base, clientIp: { enabled: true, header: ' ' } })).toThrow(/header/);
+    expect(() => parseStackTraceInit({ ...base, clientIp: { enabled: true, trustProxy: true } })).toThrow(/trustProxy/);
+  });
+});

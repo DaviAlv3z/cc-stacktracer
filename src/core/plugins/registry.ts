@@ -1,10 +1,13 @@
 import { getSdkRuntime } from '../client-ref.js';
 import type { StackTraceClient } from '../stacktrace-client.js';
 import type { SdkInitConfig } from '../client-ref.js';
+import { runDetached } from '../safe-run.js';
 import { isStackTracePlugin, type StackTraceContext, type StackTracePlugin } from './types.js';
 
 const plugins: StackTracePlugin[] = [];
 const inited = new Set<string>();
+/** Inits em andamento: quem chega depois espera o mesmo, em vez de rodar de novo ou seguir sem ele. */
+const initializing = new Map<StackTracePlugin, Promise<void>>();
 
 function buildContext(): StackTraceContext {
   return {
@@ -31,6 +34,11 @@ export function register(plugin: StackTracePlugin): void {
     plugins.push(plugin);
   }
   inited.delete(plugin.name);
+  // Com o SDK já iniciado, o plugin entra em ação agora. Até a 3.2 só o `auto()` inicializava plugins:
+  // `init()` + `register()` deixava o plugin registrado e desligado, em silêncio.
+  if (getSdkRuntime().client !== null) {
+    runDetached('plugins.init', initRegisteredPlugins);
+  }
 }
 
 /** Alias for {@link register} (Express-style). */
@@ -45,6 +53,7 @@ export function getPlugins(): readonly StackTracePlugin[] {
 export function clearPluginsForTests(): void {
   plugins.length = 0;
   inited.clear();
+  initializing.clear();
 }
 
 const PLUGIN_ORDER: Record<string, number> = {
@@ -72,16 +81,32 @@ export async function initRegisteredPlugins(): Promise<void> {
   const ordered = sortPlugins(plugins);
   for (const p of ordered) {
     if (inited.has(p.name)) continue;
-    try {
-      await Promise.resolve(p.init(ctx));
-      inited.add(p.name);
-    } catch (err) {
-      console.warn(`[cc-stacktracer] plugin "${p.name}" failed to initialize and was skipped:`, err);
+    // Um init por plugin, por mais chamadas concorrentes que haja (a do `init()` e a do `auto()`):
+    // instrumentação dobrada é span dobrado.
+    let running = initializing.get(p);
+    if (running === undefined) {
+      running = Promise.resolve()
+        .then(() => p.init(ctx))
+        .then(
+          () => {
+            // Substituído no meio do init (register com o mesmo nome): o nome é do novo plugin (R1).
+            if (plugins.includes(p)) inited.add(p.name);
+          },
+          (err: unknown) => {
+            console.warn(`[cc-stacktracer] plugin "${p.name}" failed to initialize and was skipped:`, err);
+          },
+        )
+        .finally(() => {
+          initializing.delete(p);
+        });
+      initializing.set(p, running);
     }
+    await running;
   }
 }
 
 /** Mark a plugin as needing init again (e.g. after tests). */
 export function resetPluginInitState(): void {
   inited.clear();
+  initializing.clear();
 }

@@ -1,6 +1,7 @@
 import { EventEmitter } from 'node:events';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { getStackTraceClient, init, shutdown } from '../index.js';
+import { auto, getStackTraceClient, init, shutdown } from '../index.js';
+import { clearPluginsForTests } from '../core/plugins/registry.js';
 import { runWithTraceContext } from '../core/trace-span-context.js';
 import { createLucidStackTracePlugin, MAX_PENDING_LUCID_QUERIES } from './lucid.js';
 import type { StackTraceContext } from '../core/plugins/types.js';
@@ -47,6 +48,32 @@ async function setupLucid(): Promise<{ transport: ReturnType<typeof vi.fn>; db: 
 /** Shape knex puts on `query` / `query-response` / `query-error` events (fields the plugin relies on). */
 function knexQueryEvent(uid: string, sql: string, method = 'select'): Record<string, unknown> {
   return { __knexUid: 'conn-1', __knexQueryUid: uid, sql, bindings: [], method };
+}
+
+/** O serviço `db` do Lucid: gerente de conexões; cada conexão tem o próprio knex (`client`/`readClient`). */
+function fakeLucidService(): {
+  service: { manager: { connections: Map<string, { config: unknown; connection?: unknown }> }; emitter: EventEmitter };
+  connect: (name: string, opts?: { replica?: boolean }) => { client: EventEmitter; readClient: EventEmitter };
+} {
+  const emitter = new EventEmitter();
+  const connections = new Map<string, { config: unknown; connection?: unknown }>();
+  connections.set('pg', { config: { client: 'pg' } });
+  const connect = (name: string, opts: { replica?: boolean } = {}) => {
+    const client = new EventEmitter();
+    const readClient = opts.replica === true ? new EventEmitter() : client;
+    const connection = { client, readClient, config: { client: 'pg' } };
+    connections.set(name, { config: { client: 'pg' }, connection });
+    emitter.emit('db:connection:connect', connection);
+    return { client, readClient };
+  };
+  return { service: { manager: { connections }, emitter }, connect };
+}
+
+async function query(knex: EventEmitter, uid: string, sql: string): Promise<void> {
+  await runWithTraceContext(traceId, rootSpanId, async () => {
+    knex.emit('query', knexQueryEvent(uid, sql));
+    knex.emit('query-response', [], knexQueryEvent(uid, sql), {});
+  });
 }
 
 describe('db-lucid plugin', () => {
@@ -278,5 +305,92 @@ describe('db-lucid plugin fail-open', () => {
     });
     await vi.waitFor(() => expect(spans(transport).length).toBeGreaterThan(0));
     expect(spans(transport)[0]?.db_table).toBe('events');
+  });
+});
+
+describe('db-lucid com o serviço db do Lucid (3.3)', () => {
+  afterEach(async () => {
+    clearPluginsForTests();
+    vi.restoreAllMocks();
+    await shutdown();
+  });
+
+  it('instrumenta a conexão que o Lucid abre depois, com db_system do driver', async () => {
+    const transport = setup();
+    const lucid = fakeLucidService();
+    await createLucidStackTracePlugin(lucid.service).init(pluginCtx);
+    const { client } = lucid.connect('pg');
+    await query(client, 'uid-late', 'select * from users');
+    await vi.waitFor(() => expect(spans(transport)).toHaveLength(1));
+    expect(spans(transport)[0]).toMatchObject({
+      span_type: 'db',
+      db_system: 'postgres',
+      db_table: 'users',
+      parent_span_id: rootSpanId,
+    });
+  });
+
+  it('instrumenta também a conexão aberta ANTES do plugin', async () => {
+    const transport = setup();
+    const lucid = fakeLucidService();
+    const { client } = lucid.connect('pg');
+    await createLucidStackTracePlugin(lucid.service).init(pluginCtx);
+    await query(client, 'uid-early', 'select * from orders');
+    await vi.waitFor(() => expect(spans(transport)).toHaveLength(1));
+  });
+
+  it('sem réplica (readClient === client): um span por query, não dois', async () => {
+    const transport = setup();
+    const lucid = fakeLucidService();
+    await createLucidStackTracePlugin(lucid.service).init(pluginCtx);
+    const { client } = lucid.connect('pg');
+    await query(client, 'uid-single', 'select 1');
+    await sleep(20);
+    expect(spans(transport)).toHaveLength(1);
+  });
+
+  it('com réplica: instrumenta o knex de leitura também', async () => {
+    const transport = setup();
+    const lucid = fakeLucidService();
+    await createLucidStackTracePlugin(lucid.service).init(pluginCtx);
+    const { client, readClient } = lucid.connect('pg', { replica: true });
+    await query(client, 'uid-write', 'insert into t values (1)');
+    await query(readClient, 'uid-read', 'select * from t');
+    await vi.waitFor(() => expect(spans(transport)).toHaveLength(2));
+  });
+
+  it('o mesmo knex não é instrumentado duas vezes (register repetido)', async () => {
+    const transport = setup();
+    const lucid = fakeLucidService();
+    const { client } = lucid.connect('pg');
+    await createLucidStackTracePlugin(lucid.service).init(pluginCtx);
+    await createLucidStackTracePlugin(lucid.service).init(pluginCtx);
+    await query(client, 'uid-dup', 'select 1');
+    await sleep(20);
+    expect(spans(transport)).toHaveLength(1);
+  });
+
+  it('entrada que não é serviço do Lucid nem knex: init lança com mensagem clara', () => {
+    expect(() => createLucidStackTracePlugin({} as never).init(pluginCtx)).toThrow(
+      /Lucid `db` service .* or a Knex instance/,
+    );
+  });
+
+  it('auto({ lucid }) instala o plugin com o objeto passado, sem depender de resolver o pacote', async () => {
+    const transport = vi.fn().mockResolvedValue(undefined);
+    const lucid = fakeLucidService();
+    await auto({
+      apiKey: 'k',
+      serviceId,
+      service: 'svc',
+      environment: 'test',
+      endpoint: 'https://ingest.example.com',
+      sendMode: 'immediate',
+      transport,
+      lucid: lucid.service,
+    });
+    const { client } = lucid.connect('pg');
+    await query(client, 'uid-auto', 'select * from users');
+    await vi.waitFor(() => expect(spans(transport)).toHaveLength(1));
   });
 });

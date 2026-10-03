@@ -13,6 +13,7 @@ import type { DoctorReport } from './run-doctor.js';
 
 const OK = '  ok';
 const FAIL = '  FAIL';
+const WARN = '  WARN';
 
 function configProblemText(p: ConfigProblem): string {
   switch (p.reason) {
@@ -81,6 +82,19 @@ export function renderReport(report: DoctorReport, cwd: string, endpoint?: strin
     }
   }
   out.push('');
+
+  if (report.moduleFormat.format === 'cjs') {
+    out.push('Module format');
+    out.push(
+      report.moduleFormat.ok
+        ? `${OK}  CommonJS project on a Node that can require() cc-stacktracer (an ES module)`
+        : `${WARN}  this looks like a CommonJS project (no "type": "module") and Node ${report.moduleFormat.nodeVersion} cannot require() an ES module. Unless the app is bundled (Next.js, Vite…), it will fail to boot with ERR_REQUIRE_ESM: use Node 20.19+ or 22.12+, or make the project ESM.`,
+    );
+    out.push(
+      '        TypeScript compiling to CommonJS also needs TypeScript 5.8+ with "module": "nodenext" (or "node20" on 5.9+).',
+    );
+    out.push('');
+  }
 
   out.push('Configuration');
   if (report.config.ok) {

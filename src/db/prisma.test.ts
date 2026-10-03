@@ -367,3 +367,39 @@ describe('db-prisma plugin', () => {
     });
   });
 });
+
+describe('prisma 3.3: dbSystem e aviso do $use', () => {
+  afterEach(async () => {
+    vi.restoreAllMocks();
+    vi.unstubAllEnvs();
+    await shutdown();
+  });
+
+  it('createStackTracePrismaQueryExtension({ dbSystem }) grava o engine real', async () => {
+    const transport = setup();
+    const ext = createStackTracePrismaQueryExtension({ dbSystem: 'postgres' });
+    await runWithTraceContext(traceId, rootSpanId, () =>
+      ext.query.$allModels.$allOperations({ model: 'User', operation: 'findMany', args: {}, query: async () => [] }),
+    );
+    await vi.waitFor(() => expect(spans(transport)).toHaveLength(1));
+    expect(spans(transport)[0]).toMatchObject({ db_system: 'postgres', db_table: 'User' });
+  });
+
+  it('sem opção continua gravando prisma (histórico de quem já usa)', async () => {
+    const transport = setup();
+    const ext = createStackTracePrismaQueryExtension();
+    await runWithTraceContext(traceId, rootSpanId, () =>
+      ext.query.$queryRaw({ args: {}, query: async () => [], operation: '$queryRaw' }),
+    );
+    await vi.waitFor(() => expect(spans(transport)).toHaveLength(1));
+    expect(spans(transport)[0]).toMatchObject({ db_system: 'prisma' });
+  });
+
+  it('sem $use (Prisma 6.14+), o plugin avisa também em produção', () => {
+    vi.stubEnv('NODE_ENV', 'production');
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    createPrismaStackTracePlugin({}).init(pluginCtx);
+    expect(warn).toHaveBeenCalledTimes(1);
+    expect(String(warn.mock.calls[0]?.[0])).toContain('createStackTracePrismaQueryExtension');
+  });
+});

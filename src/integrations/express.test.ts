@@ -1,9 +1,11 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import http from 'node:http';
+import { hostname } from 'node:os';
 import type { AddressInfo } from 'node:net';
 import express from 'express';
 import request from 'supertest';
-import { createStackTraceClient, init, shutdown } from '../index.js';
+import { createStackTraceClient, init, shutdown, withSpan } from '../index.js';
+import { SDK_VERSION } from '../core/sdk-version.js';
 import type { StackTraceEvent } from '../core/stacktrace-event.types.js';
 import type { BatchTransportPayload } from '../core/stacktrace-client.js';
 import { resetFailOpenState } from '../core/safe-run.js';
@@ -310,5 +312,137 @@ describe('Express Error Tracking (3.0)', () => {
     const span = sentPayloads(transport).find((item) => item.kind === 'spans')?.spans[0];
     expect(span).toMatchObject({ status: 'ok', error_type: null, http_status_code: 404 });
     expect(errorEvents(transport)).toHaveLength(0);
+  });
+});
+
+describe('Express: identidade no span raiz', () => {
+  const IDENTITY = { 'host.name': hostname(), 'process.pid': process.pid, 'telemetry.sdk.version': SDK_VERSION };
+
+  afterEach(async () => {
+    await shutdown();
+  });
+
+  function clientWith(transport: ReturnType<typeof vi.fn>, extra: Record<string, unknown> = {}): StackTraceClient {
+    return createStackTraceClient({
+      apiKey: 'k',
+      serviceId,
+      endpoint: 'https://ingest.example.com',
+      sendMode: 'immediate',
+      transport,
+      ...extra,
+    });
+  }
+
+  async function rootSpanOf(
+    client: StackTraceClient,
+    transport: ReturnType<typeof vi.fn>,
+    headers: Record<string, string>,
+    path = '/health',
+  ) {
+    const app = express();
+    app.use(stacktraceExpressMiddleware({ client }));
+    app.get('/health', (_req, res) => res.status(200).json({ ok: true }));
+    await request(app).get(path).set(headers);
+    await vi.waitFor(() => expect(sentPayloads(transport).some((p) => p.kind === 'spans')).toBe(true));
+    return sentPayloads(transport).find((p) => p.kind === 'spans')!.spans[0]!;
+  }
+
+  it('user-agent, request id, host, pid e versao do SDK; sem IP por padrao', async () => {
+    const transport = vi.fn().mockResolvedValue(undefined);
+    const span = await rootSpanOf(clientWith(transport), transport, {
+      'user-agent': 'Mozilla/5.0 (smoke)',
+      'x-correlation-id': 'corr-9',
+    });
+    expect(span.attributes).toEqual({
+      ...IDENTITY,
+      'user_agent.original': 'Mozilla/5.0 (smoke)',
+      'http.request_id': 'corr-9',
+    });
+  });
+
+  it('com clientIp ligado: o loopback do socket, sem o prefixo IPv6 mapeado', async () => {
+    const transport = vi.fn().mockResolvedValue(undefined);
+    const span = await rootSpanOf(clientWith(transport, { clientIp: { enabled: true } }), transport, {
+      'x-forwarded-for': '1.1.1.1',
+    });
+    expect(span.attributes?.['client.address']).toBe('127.0.0.1');
+  });
+
+  it('com x-forwarded-for e 2 proxies confiaveis: o IP certo', async () => {
+    const transport = vi.fn().mockResolvedValue(undefined);
+    const client = clientWith(transport, {
+      clientIp: { enabled: true, header: 'x-forwarded-for', trustedProxies: 2 },
+    });
+    const span = await rootSpanOf(client, transport, { 'x-forwarded-for': '1.1.1.1, 203.0.113.7, 10.0.0.1' });
+    expect(span.attributes?.['client.address']).toBe('203.0.113.7');
+  });
+
+  it('404 [unmatched]: url.path junto dos campos novos', async () => {
+    const transport = vi.fn().mockResolvedValue(undefined);
+    const span = await rootSpanOf(clientWith(transport), transport, { 'user-agent': 'scanner' }, '/wp-login.php');
+    expect(span.http_route).toBe('[unmatched]');
+    expect(span.attributes).toEqual({ ...IDENTITY, 'user_agent.original': 'scanner', 'url.path': '/wp-login.php' });
+  });
+
+  it('requisicao abortada (close): os campos continuam la', async () => {
+    const transport = vi.fn().mockResolvedValue(undefined);
+    const app = express();
+    app.use(stacktraceExpressMiddleware({ client: clientWith(transport, { clientIp: { enabled: true } }) }));
+    app.get('/slow', () => {
+      /* nunca responde */
+    });
+    const server = http.createServer(app);
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+    const { port } = server.address() as AddressInfo;
+    await new Promise<void>((resolve) => {
+      const req = http.request({
+        host: '127.0.0.1',
+        port,
+        path: '/slow',
+        headers: { 'user-agent': 'aborter', 'x-request-id': 'req-abort' },
+      });
+      req.on('error', () => resolve());
+      req.end();
+      setTimeout(() => req.destroy(), 100);
+    });
+    await vi.waitFor(() => expect(sentPayloads(transport).some((p) => p.kind === 'spans')).toBe(true));
+    const span = sentPayloads(transport).find((p) => p.kind === 'spans')!.spans[0]!;
+    expect(span.http_aborted).toBe(true);
+    expect(span.attributes).toEqual({
+      ...IDENTITY,
+      'user_agent.original': 'aborter',
+      'http.request_id': 'req-abort',
+      'client.address': '127.0.0.1',
+    });
+    server.closeAllConnections();
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+  });
+
+  it('withSpan filho dentro do handler: nenhum dos campos novos', async () => {
+    const transport = vi.fn().mockResolvedValue(undefined);
+    init({
+      apiKey: 'k',
+      serviceId,
+      endpoint: 'https://ingest.example.com',
+      sendMode: 'immediate',
+      transport,
+      clientIp: { enabled: true },
+    });
+    const app = express();
+    app.use(stacktraceExpressMiddleware());
+    app.get('/work', async (_req, res) => {
+      await withSpan('child.work', async () => 'ok', { attributes: { step: 1 } });
+      res.status(200).end();
+    });
+    await request(app).get('/work').set({ 'user-agent': 'ua', 'x-request-id': 'r' });
+    await vi.waitFor(() =>
+      expect(sentPayloads(transport).flatMap((p) => (p.kind === 'spans' ? p.spans : []))).toHaveLength(2),
+    );
+    const spans = sentPayloads(transport).flatMap((p) => (p.kind === 'spans' ? p.spans : []));
+    const child = spans.find((s) => s.span_name === 'child.work');
+    const root = spans.find((s) => s.span_type === 'http');
+    expect(root?.attributes?.['user_agent.original']).toBe('ua');
+    expect(child?.parent_span_id).toBe(root?.span_id);
+    expect(child?.attributes).toEqual({ step: 1 });
   });
 });

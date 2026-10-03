@@ -5,6 +5,11 @@ import { runWithTraceContext } from '../core/trace-span-context.js';
 import { completeLocalRoot, recordBoundaryError } from '../core/error-tracking.js';
 import { httpRootSpanOutcome } from '../integrations/http-root-span-outcome.js';
 import { httpRootSpanRoute, UNMATCHED_HTTP_ROUTE } from '../integrations/http-root-span-route.js';
+import {
+  httpRootSpanIdentity,
+  withRootSpanAttributes,
+  type HttpRootSpanIdentity,
+} from '../integrations/http-root-span-identity.js';
 import { isTelemetryActive, safeRun } from '../core/safe-run.js';
 import { maskDynamicRouteSegments } from '../shared/schema/index.js';
 import { extractCorrelationFromHeaders } from '../utils/correlation.js';
@@ -26,6 +31,11 @@ export type StackTraceHttpRequestInput = {
   startTime?: number;
   requestId?: string;
   traceparent?: string;
+  /**
+   * Endereco do socket (`req.socket.remoteAddress`). So entra no span com `init({ clientIp: { enabled: true } })`
+   * e sem `header` configurado; com `header: 'x-forwarded-for'` o IP sai dos `headers`.
+   */
+  clientAddress?: string | undefined;
 };
 
 export type StackTraceHttpResponseInput = {
@@ -76,6 +86,8 @@ export class StackTraceHttpRequest {
   /** Path com os ids mascarados: a rota de quem nao informou `route` nenhum. */
   private readonly fallbackRoute: string;
   private routeOverride: string | undefined;
+  /** Calculada no `start`, onde estao os headers: o `end` pode rodar fora do contexto da requisicao. */
+  private readonly identity: HttpRootSpanIdentity | undefined;
   /** Sem telemetria (kill switch, fusível ou setup que falhou): `run` só executa e `end` não faz nada. */
   private readonly inert: boolean;
   private ended = false;
@@ -90,6 +102,7 @@ export class StackTraceHttpRequest {
     routeSource: RouteSource | undefined;
     fallbackRoute: string;
     snapshot: HttpRequestSnapshot;
+    identity?: HttpRootSpanIdentity;
     inert: boolean;
   }) {
     this.traceId = params.traceId;
@@ -104,6 +117,7 @@ export class StackTraceHttpRequest {
     this.routeSource = params.routeSource;
     this.fallbackRoute = params.fallbackRoute;
     this.snapshot = params.snapshot;
+    this.identity = params.identity;
     this.inert = params.inert;
     // Getter, e nao valor copiado: a rota pode chegar depois do roteamento (funcao ou `setRoute`).
     const request = { ...params.request } as StackTraceHttpRequestSnapshot;
@@ -164,6 +178,13 @@ export class StackTraceHttpRequest {
     });
     const url = redactUrl(input.url, client?.getUrlRedactionOptions());
     const snapshot: HttpRequestSnapshot = { method: input.method, url, headers };
+    const identity = httpRootSpanIdentity({
+      client,
+      headers,
+      rawHeaders,
+      requestId: correlation.requestId,
+      socketAddress: input.clientAddress,
+    });
 
     return new StackTraceHttpRequest({
       traceId,
@@ -175,6 +196,7 @@ export class StackTraceHttpRequest {
       routeSource: typeof input.route === 'function' ? input.route : nonEmptyRoute(input.route),
       fallbackRoute: pathOnly(url),
       snapshot,
+      ...(identity !== undefined ? { identity } : {}),
       inert: false,
     });
   }
@@ -266,7 +288,7 @@ export class StackTraceHttpRequest {
       http_status_code: response.statusCode,
       error_type: outcome.error_type,
       error_message: outcome.error_message,
-      ...(route.attributes !== undefined ? { attributes: route.attributes } : {}),
+      ...withRootSpanAttributes(this.identity, route.attributes),
     });
   }
 }

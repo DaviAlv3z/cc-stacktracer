@@ -10,7 +10,7 @@
  * reconhecer a stack.
  */
 
-export type HttpStack = 'fastify' | 'express' | 'adonis';
+export type HttpStack = 'nestjs' | 'fastify' | 'express' | 'adonis';
 export type DbStack = 'prisma' | 'lucid';
 
 /**
@@ -18,6 +18,8 @@ export type DbStack = 'prisma' | 'lucid';
  * ambiguidade é reportada em `ambiguous` em vez de resolvida por chute.
  */
 const HTTP_MARKERS: ReadonlyArray<readonly [HttpStack, string]> = [
+  // Primeiro: um app NestJS traz express ou fastify junto, e o snippet certo é o do Nest.
+  ['nestjs', '@nestjs/core'],
   ['fastify', 'fastify'],
   ['adonis', '@adonisjs/core'],
   ['express', 'express'],
@@ -31,6 +33,8 @@ const DB_MARKERS: ReadonlyArray<readonly [DbStack, string]> = [
 export type PackageJsonLike = {
   dependencies?: Record<string, string> | undefined;
   devDependencies?: Record<string, string> | undefined;
+  /** `"module"` para projeto ESM; ausente (ou `"commonjs"`) para CommonJS. */
+  type?: string | undefined;
 };
 
 export type DetectedStack = {

@@ -1,0 +1,12 @@
+{
+  "name": "smoke-partial-rejection",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "smoke": "node main.mjs"
+  },
+  "dependencies": {},
+  "smoke": {
+    "minNode": "20.0.0"
+  }
+}

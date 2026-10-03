@@ -1,0 +1,7 @@
+{
+  "name": "smoke-cjs-require",
+  "private": true,
+  "scripts": { "smoke": "node main.cjs" },
+  "dependencies": {},
+  "smoke": { "requireEsm": true }
+}

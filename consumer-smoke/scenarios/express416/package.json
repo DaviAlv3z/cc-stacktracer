@@ -1,0 +1,14 @@
+{
+  "name": "smoke-express416",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "smoke": "node main.mjs"
+  },
+  "dependencies": {
+    "express": "4.16.0"
+  },
+  "smoke": {
+    "minNode": "20.0.0"
+  }
+}

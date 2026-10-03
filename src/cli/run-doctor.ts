@@ -14,6 +14,7 @@
 import { SDK_VERSION } from '../core/sdk-version.js';
 import { checkConfig, type ConfigCheckResult } from './check-config.js';
 import { checkConnectivity, type ConnectivityResult } from './check-connectivity.js';
+import { checkModuleFormat, type ModuleFormatCheck } from './check-module-format.js';
 import { detectStack, type DetectedStack, type PackageJsonLike } from './detect-stack.js';
 import { fetchAudit, type AuditFinding, type FetchAuditResult } from './fetch-audit.js';
 import { probeIngest, type ProbeResult } from './probe-ingest.js';
@@ -26,12 +27,16 @@ export type DoctorDeps = {
   /** `null` quando não há `package.json` legível no diretório atual. */
   packageJson: PackageJsonLike | null;
   fetchImpl: Parameters<typeof checkConnectivity>[1] & Parameters<typeof probeIngest>[1];
+  /** Versão do Node do processo. Injetável para teste. */
+  nodeVersion?: string;
 };
 
 export type DoctorReport = {
   /** Versao do SDK que produziu este relatorio — o consumidor de `--json` precisa correlacionar. */
   sdkVersion: string;
   stack: DetectedStack;
+  /** CommonJS num Node sem `require()` de ESM não carrega o SDK. Informativo: não altera o exit code. */
+  moduleFormat: ModuleFormatCheck;
   config: ConfigCheckResult;
   /** `null` quando a etapa não rodou — config inválida torna o resultado sem sentido. */
   connectivity: ConnectivityResult | null;
@@ -56,6 +61,7 @@ export async function runDoctor(deps: DoctorDeps): Promise<DoctorReport> {
   const report: DoctorReport = {
     sdkVersion: SDK_VERSION,
     stack,
+    moduleFormat: checkModuleFormat(deps.packageJson, deps.nodeVersion ?? process.versions.node),
     config,
     connectivity: null,
     probe: null,

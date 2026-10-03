@@ -1,0 +1,21 @@
+{
+  "name": "smoke-lucid22-pg",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "smoke": "node auto.mjs && node register.mjs"
+  },
+  "dependencies": {
+    "@adonisjs/core": "^7.5.2",
+    "@adonisjs/lucid": "^22.4.2",
+    "luxon": "^3.5.0",
+    "pg": "^8.13.1"
+  },
+  "smoke": {
+    "minNode": "24.0.0",
+    "services": [
+      "postgres"
+    ],
+    "timeoutMs": 120000
+  }
+}

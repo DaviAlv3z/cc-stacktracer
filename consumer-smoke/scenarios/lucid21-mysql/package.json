@@ -1,0 +1,21 @@
+{
+  "name": "smoke-lucid21-mysql",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "smoke": "node auto.mjs && node register.mjs"
+  },
+  "dependencies": {
+    "@adonisjs/core": "^6.21.0",
+    "@adonisjs/lucid": "^21.8.2",
+    "luxon": "^3.5.0",
+    "mysql2": "^3.11.0"
+  },
+  "smoke": {
+    "minNode": "20.6.0",
+    "services": [
+      "mysql"
+    ],
+    "timeoutMs": 120000
+  }
+}

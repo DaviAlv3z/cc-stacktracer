@@ -4,6 +4,123 @@ All notable changes to the `cc-stacktracer` SDK are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.3.0] - Unreleased
+
+What the SDK promises now holds in the apps that use it: jobs deliver without `shutdown()`, Lucid and
+Fastify work as documented, explicit flushes do not wait out a retry backoff, and lost telemetry is never
+silent.
+
+### Requirements
+
+- **Node.js 20 or newer** (`engines` was `>=18`). Node 18 reached end of life in April 2025 and is no longer
+  tested; `npm install` on it now shows `EBADENGINE`. CommonJS projects need Node 20.19+ or 22.12+.
+- TypeScript 5.5+ for projects that type-check against the SDK (see "CommonJS" below for CommonJS projects).
+
+### Fixed
+
+- **A job, cron or CLI lost all its telemetry when it ended without `shutdown()`.** The SDK's timers do not
+  hold the process (on purpose), so it exited with the queue full: a `withTrace` job delivered nothing. The
+  SDK now flushes when the event loop empties (`beforeExit`), capped at 2 seconds. `process.exit()` and
+  signals do not emit `beforeExit`: call `await StackTrace.shutdown()` there.
+- **`shutdown()`, `flush()` and the crash handler sent nothing after one transient ingestion failure.** After a
+  503 or a timeout, the queue waits before retrying, and an explicit flush returned at once without trying:
+  the rest of that process's telemetry — the crash event included — was lost. `flush()`, `shutdown()`, the
+  crash handler and the exit flush now try right away; only background retries wait for the backoff.
+- **Lucid instrumentation never produced a span through the documented paths.** `auto({ lucid: db })`
+  skipped it (`@adonisjs/lucid` does not export `package.json`, so the dependency check said "not
+  installed"); `register()` after `init()` never initialized the plugin; and the plugin expected a Knex
+  instance, while the documented `db` is Lucid's connection manager. The plugin now takes the Lucid `db`
+  service (or a Knex instance) and instruments every connection — open ones and the ones Lucid opens
+  later — with `db_system` from the driver (`pg` → `postgres`, `mysql2` → `mysql`, `mssql` → `sqlserver`,
+  `better-sqlite3` → `sqlite`).
+- **`register()` after `init()` left the plugin registered and off**, and `init()` never initialized plugins
+  registered before it. Both initialize now; concurrent initializations run each plugin once.
+- **`import 'cc-stacktracer/fastify'` crashed at boot with `ERR_MODULE_NOT_FOUND`** unless the app happened to
+  have `fastify-plugin`, which Fastify does not install. The SDK no longer depends on it.
+- **TypeScript projects without Fastify failed to compile with `skipLibCheck: false`**: the SDK's own types
+  imported `fastify` (`TS2307: Cannot find module 'fastify'`). The `fastify` option of `auto()` is now typed
+  structurally; any Fastify 4 or 5 instance still fits.
+- **NestJS 10/11 projects (`"module": "commonjs"`) could not resolve the subpaths** (`cc-stacktracer/express`
+  and the others). The package now ships `typesVersions` for the `node10` module resolution.
+- **After `shutdown()`, a hanging ingestion kept the process alive for up to 10 seconds.** Deliveries still in
+  flight when the 5-second deadline expires are now cancelled.
+- Calling `init()` again dropped what the previous client still had queued; it is now delivered with the
+  previous configuration.
+- Fastify 4 printed `DeprecationWarning FSTDEP017` because the SDK read `request.routerPath`.
+- `npx cc-stacktracer doctor` printed setup snippets that did not work for Adonis, Lucid, Prisma and Express,
+  and did not recognize NestJS.
+
+### Added
+
+- **A warning when telemetry is lost**, once per kind, through your `logger` if configured, otherwise
+  `console.warn`. It covers:
+  - rejected API key (401/403);
+  - unknown endpoint or service (404);
+  - rejected batch;
+  - ingestion unreachable after retries;
+  - queue full;
+  - telemetry still queued when the process exits or `shutdown()` returns, with the last error (e.g.
+    `ECONNREFUSED`);
+  - items the ingestion accepted in a batch but rejected one by one (e.g. a `serviceId` from another
+    project);
+  - events that fail local validation.
+
+  Failures that are still being retried do not warn.
+- **Request identity on the root HTTP span** (Express, Fastify, Adonis and generic HTTP), under OpenTelemetry
+  names: `user_agent.original`, `http.request_id`, `host.name`, `process.pid` and `telemetry.sdk.version`. Child
+  spans do not repeat them, and a header listed in `headerRedaction.extraSensitiveKeys` is never copied.
+- **`init({ clientIp })`** adds the client IP to the root HTTP span as `client.address`. It is off by default: an
+  IP is personal data. Without `header`, it is the socket address. With `header: 'x-forwarded-for'`, it is the
+  entry `trustedProxies` hops from the right (default 1), never the leftmost one, which the caller controls. Any
+  other header (`x-real-ip`, `cf-connecting-ip`) is read as a single value. Set `header` only behind a proxy of
+  your own that overwrites or appends it. In the generic HTTP integration, pass `clientAddress` to
+  `startHttpRequest`. `beforeSend` does not run on spans: to keep the IP out, leave `clientIp` off.
+- `createStackTracePrismaQueryExtension({ dbSystem })` records the real engine (`postgres`, `mysql`,
+  `sqlserver`…) instead of `prisma`. Without the option nothing changes. Tested with Prisma 5, 6 and 7 —
+  Prisma 7 needs a driver adapter (e.g. `@prisma/adapter-pg`) — on PostgreSQL and SQL Server.
+- `doctor` checks the module format (a CommonJS project needs Node 20.19+ or 22.12+ to load cc-stacktracer)
+  and recognizes NestJS.
+- A NestJS guide (`docs/guides/integration-nestjs.en-US.md`): Express and Fastify adapters, the exception
+  filter and shutdown hooks.
+
+### Changed
+
+- `auto({ fastify, prisma, lucid })` no longer checks whether the package is installed — the object you pass
+  proves it.
+- `fastify-plugin` is no longer a peer dependency.
+- Without `$use` (Prisma 6.14+), `auto({ prisma })` and `createPrismaStackTracePlugin` warn in every
+  environment, production included — they used to stay silent there while instrumenting nothing.
+- When telemetry is pending at exit, your own `beforeExit` listeners run once more after the SDK's flush
+  (Node re-emits `beforeExit` after asynchronous work).
+- The SDK reads the body of the ingestion's `202` response, to report partially rejected batches.
+
+### Tested with (in CI, on the packed package, inside clean projects and real apps)
+
+Node.js 20, 22, 24 and 26 · TypeScript 5.5 to 7.0 · Express 4.16+ and 5 · Fastify 4 and 5 · AdonisJS 6 and 7
+with Lucid 20 to 22 (PostgreSQL, MySQL, SQL Server, SQLite) · NestJS 10, 11 and 12 (Express and Fastify
+adapters) · Prisma 5, 6 and 7 (PostgreSQL, SQL Server).
+
+### CommonJS (NestJS, TypeScript compiled to CommonJS)
+
+cc-stacktracer is an ES module. From CommonJS it needs Node.js 20.19+ or 22.12+ (`require()` of ES modules),
+and TypeScript must compile with `"module": "nodenext"` (TypeScript 5.8+) or `"node20"` (5.9+);
+`"node16"` cannot load ES modules from CommonJS. Projects on the older `"moduleResolution": "node"` (the
+NestJS 10/11 default) work up to TypeScript 6.0.
+
+### Upgrading from 3.2
+
+1. Jobs and CLIs: nothing to do — they deliver at exit now. Keep `shutdown()` wherever you call
+   `process.exit()`; otherwise you now get a warning that telemetry was lost.
+2. Graceful shutdown: call `await StackTrace.shutdown()` from your framework's shutdown hook — Fastify
+   `onClose`, Adonis `app.terminating`, NestJS `OnApplicationShutdown` (with `enableShutdownHooks()`), or your
+   `SIGTERM` handler. The guides show each one.
+3. Lucid: one `auto({ lucid: db })` in a preload; remove workarounds that called `plugin.init()` by hand, and
+   do not call `init()` before `auto()`.
+4. Prisma: pass `{ dbSystem: 'postgres' }` (or your engine) to `createStackTracePrismaQueryExtension`.
+5. NestJS: in the global exception filter, call `StackTrace.recordRequestError(exception)` instead of
+   `captureException` — the root span then carries `error_type`, and the event the final status.
+6. A new `[cc-stacktracer]` warning means real data loss — follow it.
+
 ## [3.2.0] - 2026-09-26
 
 AdonisJS works for real, the error handler you cannot see through gets an API, and unmatched requests

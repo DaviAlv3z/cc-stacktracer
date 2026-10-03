@@ -1,0 +1,13 @@
+{
+  "name": "smoke-process-exit-warning",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "smoke": "node main.mjs"
+  },
+  "dependencies": {},
+  "smoke": {
+    "minNode": "20.0.0",
+    "timeoutMs": 60000
+  }
+}

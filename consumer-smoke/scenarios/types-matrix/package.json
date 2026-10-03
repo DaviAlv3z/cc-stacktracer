@@ -1,0 +1,8 @@
+{
+  "name": "smoke-types-matrix",
+  "private": true,
+  "type": "module",
+  "scripts": { "smoke": "node main.mjs" },
+  "dependencies": {},
+  "smoke": { "nodeMajors": [24], "timeoutMs": 900000 }
+}

@@ -126,6 +126,27 @@ describe('EventQueue', () => {
 
     q.stop();
   });
+
+  it('pendingCount conta a fila; flushPending({ ignoreBackoff }) tenta mesmo dentro do backoff', async () => {
+    const deliver = vi.fn().mockRejectedValueOnce(new Error('fora do ar')).mockResolvedValue(undefined);
+    const q = new EventQueue({
+      sendMode: 'batch',
+      maxBatchSize: 50,
+      flushIntervalMs: 60_000,
+      deliver,
+      retryBackoff: { random: () => 0.5 },
+    });
+    q.enqueue(logEvent('a'));
+    expect(q.pendingCount()).toBe(1);
+    await q.flushPending();
+    expect(deliver).toHaveBeenCalledTimes(1);
+    await q.flushPending();
+    expect(deliver).toHaveBeenCalledTimes(1);
+    await q.flushPending({ ignoreBackoff: true });
+    expect(deliver).toHaveBeenCalledTimes(2);
+    expect(q.pendingCount()).toBe(0);
+    q.stop();
+  });
 });
 
 describe('EventQueue fail-open', () => {
@@ -162,5 +183,53 @@ describe('EventQueue fail-open', () => {
     const q = new EventQueue({ sendMode: 'immediate', maxBatchSize: 1, flushIntervalMs: 60_000, deliver });
     for (let i = 0; i < 100; i += 1) q.enqueue(logEvent(`e${i}`));
     expect(deliver).toHaveBeenCalledTimes(64);
+  });
+
+  it('onDrop recebe o que sai sem entrega: rejeitado, esgotado e fila cheia', async () => {
+    const onDrop = vi.fn();
+    const rejected = new EventQueue({
+      sendMode: 'batch',
+      maxBatchSize: 2,
+      flushIntervalMs: 60_000,
+      deliver: vi.fn().mockRejectedValue(new IngestTransportError({ status: 401 })),
+      onDrop,
+    });
+    rejected.enqueue(logEvent('a'));
+    rejected.enqueue(logEvent('b'));
+    await rejected.flushPending();
+    expect(onDrop).toHaveBeenCalledWith(expect.objectContaining({ count: 2, reason: 'rejected' }));
+    rejected.stop();
+
+    const full = new EventQueue({
+      sendMode: 'batch',
+      maxBatchSize: 50,
+      flushIntervalMs: 60_000,
+      maxQueueSize: 1,
+      deliver: vi.fn().mockResolvedValue(undefined),
+      onDrop,
+    });
+    full.enqueue(logEvent('x'));
+    full.enqueue(logEvent('y'));
+    expect(onDrop).toHaveBeenCalledWith({ count: 1, reason: 'overflow' });
+    full.stop();
+  });
+
+  it('depois de stop(), uma falha não arma timer de retentativa nem intervalo', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'setInterval', 'clearInterval', 'Date'] });
+    const deliver = vi.fn().mockRejectedValue(new Error('fora do ar'));
+    const q = new EventQueue({
+      sendMode: 'batch',
+      maxBatchSize: 50,
+      flushIntervalMs: 1_000,
+      deliver,
+      retryBackoff: { random: () => 0.5 },
+    });
+    q.stop();
+    q.enqueue(logEvent('a'));
+    await q.flushPending({ ignoreBackoff: true });
+    expect(deliver).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(120_000);
+    expect(deliver).toHaveBeenCalledTimes(1);
+    vi.useRealTimers();
   });
 });

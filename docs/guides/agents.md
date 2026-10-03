@@ -63,14 +63,16 @@ await StackTrace.auto({
 inside `next()`, where no middleware sees the exception — without that call a 5xx has no error event.
 See `docs/guides/integration-adonis.en-US.md`.
 
+**NestJS** (SDK 3.3+): `stacktraceExpressMiddleware()` (or `app.register(stacktracePlugin)` on the Fastify adapter) and a global `@Catch()` filter that calls `StackTrace.recordRequestError(exception)` before `super.catch()`. See `docs/guides/integration-nestjs.en-US.md`.
+
 ## 5. Database instrumentation, per stack
 
-| Stack         | How                                                                                        |
-| ------------- | ------------------------------------------------------------------------------------------ |
-| Prisma 5+     | `$extends` with `query.$allModels.$allOperations` — **not** `$use`, which Prisma 5 removed |
-| Prisma 4      | `$use` middleware                                                                          |
-| Lucid / Knex  | the `cc-stacktracer/db-lucid` subpath                                                      |
-| anything else | wrap the queries that matter with `StackTrace.runQuery`                                    |
+| Stack         | How                                                                                                                 |
+| ------------- | ------------------------------------------------------------------------------------------------------------------- |
+| Prisma 4.16+  | `$extends(createStackTracePrismaQueryExtension({ dbSystem: '<engine>' }))` — **not** `$use`, removed in Prisma 6.14 |
+| Prisma 4–6.13 | `$use` middleware (`createPrismaStackTracePlugin`), or the extension                                                |
+| Lucid / Knex  | `auto({ lucid: db })` with the Lucid `db` service (3.3+), or `register(createLucidStackTracePlugin(db))`            |
+| anything else | wrap the queries that matter with `StackTrace.runQuery`                                                             |
 
 Without database spans there is no waterfall, and "the request is slow" has no answer.
 

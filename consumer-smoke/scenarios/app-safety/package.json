@@ -1,0 +1,8 @@
+{
+  "name": "smoke-app-safety",
+  "private": true,
+  "type": "module",
+  "scripts": { "smoke": "node main.mjs" },
+  "dependencies": { "express": "^5.2.1" },
+  "smoke": { "minNode": "20.0.0", "timeoutMs": 120000 }
+}

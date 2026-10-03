@@ -1,0 +1,32 @@
+{
+  "name": "smoke-app-fastify-prisma-mssql",
+  "version": "1.0.0",
+  "private": true,
+  "main": "dist/server.js",
+  "scripts": {
+    "build": "prisma generate && tsc -p .",
+    "smoke": "node smoke.mjs"
+  },
+  "dependencies": {
+    "@fastify/cors": "^11.0.0",
+    "@fastify/helmet": "^13.0.0",
+    "@fastify/rate-limit": "^10.0.0",
+    "@prisma/client": "^6.19.0",
+    "fastify": "^5.8.1",
+    "mssql": "^11.0.1"
+  },
+  "devDependencies": {
+    "@types/mssql": "^9.1.5",
+    "@types/node": "^20.14.10",
+    "prisma": "^6.19.0",
+    "typescript": "~5.8.3"
+  },
+  "smoke": {
+    "minNode": "20.19.0",
+    "requireEsm": true,
+    "services": [
+      "mssql"
+    ],
+    "timeoutMs": 300000
+  }
+}
