@@ -2,7 +2,12 @@ import { getErrorTrackingConfig } from '../../core/error-tracking-config.js';
 import { isTelemetryActive, safeRun } from '../../core/safe-run.js';
 import { beginOutboundSpan, endOutboundSpan, type OutboundSpanStart } from '../../core/tracing.js';
 import { buildTraceparent } from '../../utils/traceparent.js';
-import { classifyOutboundUrl, sanitizedTarget } from './url-classification.js';
+import {
+  classifyOutboundUrl,
+  outboundExtraAttributes,
+  outboundRoute,
+  shouldPropagateTraceparent,
+} from './url-classification.js';
 import type { OutboundHttpOptions } from './types.js';
 
 type FetchFn = typeof globalThis.fetch;
@@ -51,12 +56,7 @@ type PreparedFetch = {
 };
 
 /** Tudo o que o SDK faz ANTES da chamada. `undefined` = esta chamada não é instrumentada. */
-function prepareFetch(
-  input: FetchInput,
-  init: FetchInit,
-  options: OutboundHttpOptions,
-  propagate: boolean,
-): PreparedFetch | undefined {
+function prepareFetch(input: FetchInput, init: FetchInit, options: OutboundHttpOptions): PreparedFetch | undefined {
   const url = resolveUrl(input);
   if (url === undefined) return undefined;
   const begin = beginOutboundSpan();
@@ -66,13 +66,14 @@ function prepareFetch(
   const method = resolveMethod(input, init).toUpperCase();
   return {
     begin,
-    init: propagate
+    init: shouldPropagateTraceparent(classification, options)
       ? withTraceparent(input, init, buildTraceparent(begin.traceId, begin.spanId, begin.traceFlags))
       : init,
     name: `http.client ${method} ${url.host}`,
     attributes: {
+      ...outboundExtraAttributes(url, method, options),
       http_method: method,
-      http_route: sanitizedTarget(url),
+      http_route: outboundRoute(url, method, options),
       'url.scheme': url.protocol.replace(':', ''),
       'server.address': url.hostname,
       ...(url.port !== '' ? { 'server.port': Number(url.port) } : {}),
@@ -107,12 +108,9 @@ export function instrumentFetch(options: OutboundHttpOptions = {}): () => void {
     return () => {};
   }
   const original = current;
-  const propagate = options.propagateTraceparent !== false;
 
   const wrapped = async function instrumentedFetch(input: FetchInput, init?: FetchInit): Promise<Response> {
-    const prepared = isTelemetryActive()
-      ? safeRun('fetch.setup', () => prepareFetch(input, init, options, propagate))
-      : undefined;
+    const prepared = isTelemetryActive() ? safeRun('fetch.setup', () => prepareFetch(input, init, options)) : undefined;
     if (prepared === undefined) {
       return original(input, init);
     }

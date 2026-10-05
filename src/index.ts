@@ -21,7 +21,8 @@ import { clearTags, clearUser, resetScopeMetadata, setTags, setUser, tag } from 
 import { withBusinessContext, withBusinessContextAsync } from './core/business-context.js';
 import { createStackTraceClient, StackTraceClient, type BatchTransportPayload } from './core/stacktrace-client.js';
 import type { ServiceDescriptor, StackTraceEvent } from './core/stacktrace-event.types.js';
-import { endSpan, startSpan, withSpan } from './core/tracing.js';
+import { beginOutboundSpan, endOutboundSpan, endSpan, startSpan, withSpan, withTrace } from './core/tracing.js';
+import { setRootSpanAttributes } from './core/root-span-attributes.js';
 import { instrumentFetch, instrumentNodeHttp } from './integrations/outbound-http/index.js';
 import { endHttpRequest, runWithHttpContext, startHttpRequest } from './generic-http/index.js';
 import { measure, runQuery } from './performance/measure.js';
@@ -97,6 +98,7 @@ function startClient(parsed: ParsedStackTraceInit): void {
     endpoint: parsed.endpoint,
     ...(parsed.tenantId !== undefined ? { tenantId: parsed.tenantId } : {}),
     ...(parsed.projectId !== undefined ? { projectId: parsed.projectId } : {}),
+    ...(parsed.identityOnSpans === true ? { identityOnSpans: true } : {}),
     errorTracking: resolveErrorTrackingConfig({
       errorTracking: parsed.errorTracking,
       httpServerErrorStatuses: parsed.httpServerErrorStatuses,
@@ -209,7 +211,7 @@ export async function shutdown(): Promise<void> {
  * Initialize the SDK and optionally wire framework integrations (Fastify, Prisma, Lucid) when the matching packages are installed.
  */
 export async function auto(options: StackTraceAutoOptions): Promise<void> {
-  const { fastify, prisma, lucid, outboundHttp, ...initOpts } = options;
+  const { fastify, prisma, lucid, lucidOptions, outboundHttp, ...initOpts } = options;
   init(initOpts);
   if (getSdkRuntime().client === null) {
     return;
@@ -244,10 +246,10 @@ export async function auto(options: StackTraceAutoOptions): Promise<void> {
   if (lucid !== undefined) {
     try {
       const mod = (await import('./db/lucid.js')) as {
-        createLucidStackTracePlugin?: (db: unknown) => StackTracePlugin;
+        createLucidStackTracePlugin?: (db: unknown, options?: unknown) => StackTracePlugin;
       };
       if (typeof mod.createLucidStackTracePlugin === 'function') {
-        registerPlugin(mod.createLucidStackTracePlugin(lucid));
+        registerPlugin(mod.createLucidStackTracePlugin(lucid, lucidOptions));
       }
     } catch {
       /* optional */
@@ -279,8 +281,12 @@ export const StackTrace = {
   logStructured,
   measure,
   withSpan,
+  withTrace,
   startSpan,
   endSpan,
+  beginOutboundSpan,
+  endOutboundSpan,
+  setRootSpanAttributes,
   instrumentFetch,
   instrumentNodeHttp,
   runQuery,
@@ -323,6 +329,7 @@ export { CaptureGate, CapturePolicyCache, RuleEngine } from './observability/cap
 export { extractSqlVerb, measure, runQuery } from './performance/measure.js';
 export type { MeasureOptions, RunQueryOptions } from './performance/measure.js';
 export { withSpan, withTrace, startSpan, endSpan, beginOutboundSpan, endOutboundSpan } from './core/tracing.js';
+export { setRootSpanAttributes } from './core/root-span-attributes.js';
 export type { SpanHandle, SpanOptions, OutboundSpanStart } from './core/tracing.js';
 export { instrumentFetch, instrumentNodeHttp } from './integrations/outbound-http/index.js';
 export type { OutboundHttpOptions, OutboundClassification } from './integrations/outbound-http/index.js';

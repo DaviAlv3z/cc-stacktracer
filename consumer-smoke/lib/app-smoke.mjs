@@ -25,10 +25,21 @@ function tcpOpen(port) {
 
 /**
  * @param {{ name: string, cwd: string, command: string[], env?: Record<string, string>, port?: number,
- *           expectDbSpans?: number, dbSystem?: string }} options
+ *           expectDbSpans?: number, dbSystem?: string, identityOnSpans?: boolean, dbStatement?: boolean }} options
+ * `identityOnSpans`/`dbStatement` (3.4): a app liga `identityOnSpans` e `lucidOptions.statement`, e o roteiro confere.
  * `env` vai para a app (o endpoint do SDK é o receptor, sempre). A app escuta em `port` (PORT no env).
  */
-export async function runAppSmoke({ name, cwd, command, env = {}, port = 3333, expectDbSpans = 0, dbSystem }) {
+export async function runAppSmoke({
+  name,
+  cwd,
+  command,
+  env = {},
+  port = 3333,
+  expectDbSpans = 0,
+  dbSystem,
+  identityOnSpans = false,
+  dbStatement = false,
+}) {
   const check = createCheck(name);
   const receiver = await startReceiver();
   const child = spawn(command[0], command.slice(1), {
@@ -70,7 +81,7 @@ export async function runAppSmoke({ name, cwd, command, env = {}, port = 3333, e
   child.kill('SIGTERM');
   const how = await Promise.race([exited, sleep(20_000).then(() => 'TIMEOUT')]);
   check.ok(how === 0 || how === 'SIGTERM', `app encerrou no SIGTERM (${how}); saída: ${out.trim().slice(-600)}`);
-  checkHttpTelemetry(check, receiver, statuses);
+  checkHttpTelemetry(check, receiver, statuses, { identityOnSpans });
   if (expectDbSpans > 0) {
     const spans = receiver.spans();
     const roots = new Set(spans.filter((s) => s.parent_span_id === null).map((s) => s.span_id));
@@ -78,6 +89,12 @@ export async function runAppSmoke({ name, cwd, command, env = {}, port = 3333, e
     check.equal(dbSpans.length, expectDbSpans, 'spans de banco');
     check.ok(dbSpans.length > 0 && dbSpans.every((s) => s.db_system === dbSystem), `db_system ${dbSystem} (veio ${[...new Set(dbSpans.map((s) => s.db_system))]})`);
     check.ok(dbSpans.length > 0 && dbSpans.every((s) => roots.has(s.parent_span_id)), 'spans de banco filhos do span raiz da requisição');
+    if (dbStatement) {
+      check.ok(
+        dbSpans.length > 0 && dbSpans.every((s) => typeof s.attributes?.db_statement === 'string'),
+        `db_statement em todo span de banco (lucidOptions.statement; veio ${JSON.stringify(dbSpans[0]?.attributes)})`,
+      );
+    }
   }
   await receiver.close();
   check.done();

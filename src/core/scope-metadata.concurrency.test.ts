@@ -59,4 +59,25 @@ describe('scope-metadata sob concorrencia', () => {
     expect(fora?.tags?.regiao).toBe('sa-east-1');
     expect(fora?.tags?.requisicao).toBeUndefined();
   });
+
+  // Até a 3.3.0 o escopo novo herdava o USUÁRIO do fallback: um job que chamou setUser fora de requisição
+  // atribuía o usuário dele a toda requisição seguinte, anônimas inclusive.
+  it('nao herda o usuario do fallback ao abrir um escopo novo', () => {
+    resetScopeMetadata();
+    setUser({ id: 'usuario-do-job' });
+
+    const dentro = runWithScope(() => getScopeContextForMerge() as { user?: { id: string } } | undefined);
+
+    expect(dentro?.user).toBeUndefined();
+    resetScopeMetadata();
+  });
+
+  it('escopo aninhado herda o usuario do escopo pai', () => {
+    resetScopeMetadata();
+    const aninhado = runWithScope(() => {
+      setUser({ id: 'u-1' });
+      return runWithScope(() => getScopeContextForMerge() as { user?: { id: string } } | undefined);
+    });
+    expect(aninhado?.user?.id).toBe('u-1');
+  });
 });

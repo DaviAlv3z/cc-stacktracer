@@ -23,4 +23,4 @@ const env = {
 execFileSync(process.execPath, ['ace', 'build'], { stdio: 'inherit', env: { ...process.env, ...env, PORT: '3333' } });
 // O build leva só o código; as dependências são as do projeto (em produção seria um `npm ci --omit=dev` em build/).
 symlinkSync('../node_modules', 'build/node_modules', 'junction');
-await runAppSmoke({ name: 'app-adonis6-pg', cwd: 'build', command: [process.execPath, 'bin/server.js'], env, expectDbSpans: 30, dbSystem: 'postgres' });
+await runAppSmoke({ name: 'app-adonis6-pg', cwd: 'build', command: [process.execPath, 'bin/server.js'], env, expectDbSpans: 30, dbSystem: 'postgres', identityOnSpans: true, dbStatement: true });

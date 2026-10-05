@@ -1,5 +1,6 @@
 import { mergeEventContext } from '../core/request-context.js';
 import { SCHEMA_VERSION, type ErrorEvent, type ServiceDescriptor } from '../core/stacktrace-event.types.js';
+import { errorFields } from '../utils/error-fields.js';
 import { sanitizeStackTrace } from '../utils/sanitize-stack.js';
 import { nowIso } from '../utils/time.js';
 
@@ -13,7 +14,9 @@ export type BuildErrorEventParams = {
 };
 
 export function buildErrorEvent(params: BuildErrorEventParams): ErrorEvent {
-  const context = mergeEventContext(params.context);
+  // Os campos do erro (SQLSTATE, constraint, código da app) entram por baixo: o contexto explícito vence.
+  const fields = errorFields(params.error);
+  const context = mergeEventContext(Object.keys(fields).length > 0 ? { ...fields, ...params.context } : params.context);
   return {
     schemaVersion: SCHEMA_VERSION,
     type: 'error',

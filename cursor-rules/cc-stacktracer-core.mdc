@@ -1,7 +1,7 @@
 ---
 alwaysApply: false
-version: 0.4.5
-lastUpdated: 2026-09-26
+version: 0.5.0
+lastUpdated: 2026-10-05
 ruleset: cc-stacktracer-core
 ---
 
@@ -467,7 +467,7 @@ Payload rejection rules:
 - use snake_case for wire fields
 - use `metadata.http.status_code`, not `response_status_code`, in v4 client events
 - do not send top-level `http`, `db`, `queue`, `user`, or `tags` in v4 events; put supported blocks under `metadata`
-- do not send full SQL, bindings, request/response bodies, tokens, cookies, or authorization headers anywhere in the payload
+- do not send SQL with values, raw bindings, request/response bodies, tokens, cookies, or authorization headers anywhere in the payload; SQL with placeholders in `db_statement` and masked bindings in `db_parameters` come from the SDK's DB plugin options (3.4), never from hand-written attributes
 
 Span identity contract:
 
@@ -706,6 +706,12 @@ For traces, **one span per request is enough**: the filter selects a trace when 
 then shows the whole trace, so the auto-instrumented HTTP root and DB spans come along even though
 they cannot carry the attribute.
 
+**SDK 3.4**: `StackTrace.setTags({ subtenant: customer.slug })` once, after authentication, marks every event of
+the request; with `init({ identityOnSpans: true })` it also marks the root span (read when the request ends)
+and every span started after it, together with the `user.id` from `setUser`. In jobs, mark inside `withTrace`
+(its own scope); outside a request or `withTrace` the scope is process-wide — never mark a user or a customer
+there.
+
 Use a readable slug (`pm-peruibe`), never an id — the value is displayed raw, and high cardinality
 trips the `subtenant_cardinality` audit check.
 
@@ -730,7 +736,10 @@ await StackTrace.withSpan('invoice.pdf.generate', () => generatePdf(), {
 
 ## 10) Database Instrumentation Standard
 
-Use `runQuery` for important, slow, or high-impact DB operations.
+Use `runQuery` for important, slow, or high-impact DB operations on a database no plugin instruments. Never
+wrap a query the Lucid plugin or the Prisma extension already measures: that is a second `db` span for the
+same query, counted twice in the dashboard. To name a group of instrumented queries, use
+`withSpan(name, fn, { type: 'business' })`.
 
 ```ts
 import { runQuery } from 'cc-stacktracer';
@@ -945,7 +954,7 @@ A client integration is complete when:
 - request events are linked to the HTTP root span by `trace.span_id`
 - DB/business/external spans have `parent_span_id` when created inside requests
 - errors are captured through one canonical monitor boundary
-- DB operations are wrapped with `runQuery`
+- each DB operation is measured once: by the DB plugin, or by `runQuery` where no plugin applies
 - raw SQL uses parameterized queries and helper wrappers
 - expensive business work uses `withSpan`
 - user context is cleared after each request

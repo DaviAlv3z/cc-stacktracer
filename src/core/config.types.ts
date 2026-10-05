@@ -1,5 +1,6 @@
 import type { StackTraceEvent } from './stacktrace-event.types.js';
 import type { OutboundHttpOptions } from '../integrations/outbound-http/types.js';
+import type { LucidStackTracePluginOptions } from '../db/lucid.js';
 
 export type SendMode = 'batch' | 'immediate';
 
@@ -60,6 +61,13 @@ export type StackTraceInitOptions = {
     /** Proxies confiaveis na frente da app; so vale para `x-forwarded-for`. Inteiro >= 1, padrao 1. */
     trustedProxies?: number;
   };
+  /**
+   * Copia a identidade do escopo para os SPANS (3.4): o `id` de `setUser` como `user.id` e a tag `subtenant`
+   * (`setTags({ subtenant })`) como `subtenant` — nos spans criados depois que o escopo os conhece (banco, saída,
+   * `withSpan`, `runQuery`) e no span raiz da requisição ou do `withTrace`, lido no fim. Desligado por padrão: até a
+   * 3.3 o usuário só ia para os eventos. Com ele, o filtro de subtenant da tela de traces pega todo trace autenticado.
+   */
+  identityOnSpans?: boolean;
   /** App release (e.g. git SHA or semver) — merged into every event `context`. */
   release?: string;
   /**
@@ -128,6 +136,11 @@ export type StackTraceAutoOptions = StackTraceInitOptions & {
   prisma?: unknown;
   /** Lucid / Adonis Database — enables `cc-stacktracer/db-lucid` hooks when the package is installed. */
   lucid?: unknown;
+  /**
+   * Opções do plugin do Lucid (3.4): `statement` (SQL com placeholders em `db_statement`), `parameters`
+   * (bindings mascarados em `db_parameters`), `attributes` (atributos extras por query). Só vale com `lucid`.
+   */
+  lucidOptions?: LucidStackTracePluginOptions;
   /** Outbound HTTP instrumentation (opt-in). e.g. `{ instrumentFetch: true, internalServiceMap: {...} }`. */
   outboundHttp?: OutboundHttpAutoOptions;
 };

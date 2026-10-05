@@ -27,7 +27,11 @@ export async function userWork(StackTrace, id) {
   StackTrace.log(`user ${id}`);
 }
 
-export function checkHttpTelemetry(check, receiver, statuses) {
+/**
+ * `identityOnSpans` (3.4): o cenário liga `init({ identityOnSpans: true })`, e o span raiz de cada `/users/:id` tem de
+ * levar o usuário DA PRÓPRIA requisição — 30 concorrentes, com o raiz saindo no `finish` da resposta.
+ */
+export function checkHttpTelemetry(check, receiver, statuses, { identityOnSpans = false } = {}) {
   check.equal(statuses['/boom'], 500, 'status do /boom');
   check.equal(statuses['/wp-login.php'], 404, 'status do 404');
   const events = receiver.events();
@@ -65,5 +69,14 @@ export function checkHttpTelemetry(check, receiver, statuses) {
     check.equal(e.metadata?.http?.route, '/users/:id', `rota do log ${id}`);
     const root = roots.find((s) => s.trace_id === e.trace?.trace_id);
     check.ok(root !== undefined && root.span_id === e.trace?.span_id, `log ${id} aponta o span raiz da própria requisição`);
+    if (identityOnSpans) {
+      check.equal(root?.attributes?.['user.id'], `u-${id}`, `user.id do span raiz da requisição ${id} (identityOnSpans)`);
+    }
+  }
+  if (identityOnSpans) {
+    check.ok(
+      boom?.attributes?.['user.id'] === undefined && unmatched?.attributes?.['user.id'] === undefined,
+      'requisição sem setUser sai sem user.id no span raiz',
+    );
   }
 }

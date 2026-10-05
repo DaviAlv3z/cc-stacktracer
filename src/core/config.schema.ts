@@ -104,6 +104,7 @@ export const stackTraceInitSchema = z
      *  so criaria uma terceira forma de dizer 'nao silencie'. */
     suppressServerNotices: z.boolean().optional(),
     errorTracking: z.boolean().optional(),
+    identityOnSpans: z.boolean().optional(),
     httpServerErrorStatuses: httpErrorStatusesSchema('httpServerErrorStatuses').optional(),
     httpClientErrorStatuses: httpErrorStatusesSchema('httpClientErrorStatuses').optional(),
     tenantId: z.string().uuid().optional(),

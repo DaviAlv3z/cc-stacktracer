@@ -4,7 +4,12 @@ import type { ClientRequest, IncomingMessage } from 'node:http';
 import { isTelemetryActive, safeRun } from '../../core/safe-run.js';
 import { beginOutboundSpan, endOutboundSpan, type OutboundSpanStart } from '../../core/tracing.js';
 import { buildTraceparent } from '../../utils/traceparent.js';
-import { classifyOutboundUrl, sanitizedTarget } from './url-classification.js';
+import {
+  classifyOutboundUrl,
+  outboundExtraAttributes,
+  outboundRoute,
+  shouldPropagateTraceparent,
+} from './url-classification.js';
 import type { OutboundHttpOptions } from './types.js';
 
 /** Marks a patched core module so repeated `instrumentNodeHttp()` calls don't stack wrappers. */
@@ -47,22 +52,18 @@ function resolveMethod(args: unknown[]): string {
   return typeof method === 'string' && method !== '' ? method.toUpperCase() : 'GET';
 }
 
-function attributesFor(
-  url: URL,
-  method: string,
-  begin: OutboundSpanStart,
-  classification: ReturnType<typeof classifyOutboundUrl>,
-  status?: number,
-): Record<string, unknown> {
+function attributesFor(plan: OutboundPlan, status?: number): Record<string, unknown> {
+  const { url, classification } = plan;
   return {
-    http_method: method,
-    http_route: sanitizedTarget(url),
+    ...plan.extra,
+    http_method: plan.method,
+    http_route: plan.route,
     'url.scheme': url.protocol.replace(':', ''),
     'server.address': url.hostname,
     ...(url.port !== '' ? { 'server.port': Number(url.port) } : {}),
     'peer.kind': classification.kind === 'internal_service' ? 'internal_service' : 'external_api',
     ...(classification.kind === 'internal_service' ? { 'peer.service': classification.serviceName } : {}),
-    trace_flags: begin.traceFlags,
+    trace_flags: plan.begin.traceFlags,
     ...(status !== undefined ? { http_status_code: status } : {}),
   };
 }
@@ -73,6 +74,10 @@ type OutboundPlan = {
   begin: OutboundSpanStart;
   classification: ReturnType<typeof classifyOutboundUrl>;
   name: string;
+  /** Lidos no início: o fim da chamada pode rodar fora do contexto de quem chamou. */
+  route: string;
+  extra: Record<string, unknown> | undefined;
+  propagate: boolean;
 };
 
 /** Tudo o que o SDK decide ANTES da chamada. `undefined` = esta chamada não é instrumentada. */
@@ -84,7 +89,16 @@ function planOutbound(args: unknown[], isHttps: boolean, options: OutboundHttpOp
   const classification = classifyOutboundUrl(url, options);
   if (classification.kind === 'ignored') return undefined;
   const method = resolveMethod(args);
-  return { url, method, begin, classification, name: `http.client ${method} ${url.host}` };
+  return {
+    url,
+    method,
+    begin,
+    classification,
+    name: `http.client ${method} ${url.host}`,
+    route: outboundRoute(url, method, options),
+    extra: outboundExtraAttributes(url, method, options),
+    propagate: shouldPropagateTraceparent(classification, options),
+  };
 }
 
 /**
@@ -94,10 +108,10 @@ function planOutbound(args: unknown[], isHttps: boolean, options: OutboundHttpOp
  * `prependListener` porque callbacks `once` da app saem da lista antes dos listeners seguintes
  * rodarem, e a contagem mentiria.
  */
-function observe(req: ClientRequest, plan: OutboundPlan, propagate: boolean): void {
+function observe(req: ClientRequest, plan: OutboundPlan): void {
   // Header via `setHeader` e não reescrevendo os argumentos da app: array de headers, objetos com
   // protótipo e afins passam intocados. Se os headers já saíram na criação, não há propagação.
-  if (propagate && !req.headersSent) {
+  if (plan.propagate && !req.headersSent) {
     req.setHeader('traceparent', buildTraceparent(plan.begin.traceId, plan.begin.spanId, plan.begin.traceFlags));
   }
 
@@ -115,7 +129,7 @@ function observe(req: ClientRequest, plan: OutboundPlan, propagate: boolean): vo
     endOutboundSpan(plan.begin, {
       name: plan.name,
       type: 'external',
-      attributes: attributesFor(plan.url, plan.method, plan.begin, plan.classification, status),
+      attributes: attributesFor(plan, status),
       ...(errored !== undefined ? { err: errored, errorFromStatus: statusError !== undefined } : {}),
     });
   };
@@ -144,14 +158,13 @@ function observe(req: ClientRequest, plan: OutboundPlan, propagate: boolean): vo
 }
 
 function makeWrappedRequest(original: AnyRequest, isHttps: boolean, options: OutboundHttpOptions): AnyRequest {
-  const propagate = options.propagateTraceparent !== false;
   return function instrumentedRequest(this: unknown, ...args: unknown[]): ClientRequest {
     const plan = isTelemetryActive()
       ? safeRun('nodeHttp.setup', () => planOutbound(args, isHttps, options))
       : undefined;
     const req = original.apply(this, args);
     if (plan !== undefined) {
-      safeRun('nodeHttp.observe', () => observe(req, plan, propagate));
+      safeRun('nodeHttp.observe', () => observe(req, plan));
     }
     return req;
   };

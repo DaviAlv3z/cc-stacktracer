@@ -1,6 +1,10 @@
 import { randomBytes } from 'node:crypto';
 import type { StackTracePlugin } from '../core/plugins/types.js';
-import { runWithRequestContextAsync, type HttpRequestSnapshot } from '../core/request-context.js';
+import {
+  readRequestScopeIdentity,
+  runWithRequestContextAsync,
+  type HttpRequestSnapshot,
+} from '../core/request-context.js';
 import { isTelemetryActive, safeRun } from '../core/safe-run.js';
 import type { StackTraceClient } from '../core/stacktrace-client.js';
 import { getStackTraceClient } from '../index.js';
@@ -13,6 +17,7 @@ import { httpRootSpanOutcome } from './http-root-span-outcome.js';
 import { httpRootSpanRoute } from './http-root-span-route.js';
 import { httpRootSpanIdentity, withRootSpanAttributes } from './http-root-span-identity.js';
 import { completeLocalRoot, recordBoundaryError } from '../core/error-tracking.js';
+import { takeRootSpanAttributes } from '../core/root-span-attributes.js';
 import { warnRemovedCaptureErrors } from './removed-options.js';
 
 export type StacktraceAdonisOptions = {
@@ -122,6 +127,8 @@ function prepareRequest(ctx: AdonisHttpContextLike, opts: StacktraceAdonisOption
       remoteParentSpanId: correlation.parentSpanId,
       statusCode,
     });
+    // Sempre, mesmo sem emitir: libera a entrada da raiz.
+    const appAttributes = takeRootSpanAttributes(traceId, rootSpanId, () => readRequestScopeIdentity(snapshot));
     if (!client) return;
     const durationMs = Date.now() - start;
     snapshot.statusCode = statusCode;
@@ -151,7 +158,7 @@ function prepareRequest(ctx: AdonisHttpContextLike, opts: StacktraceAdonisOption
       ...httpRootSpanOutcome(aborted, statusCode, boundaryError),
       http_method: method,
       http_route: route.http_route,
-      ...withRootSpanAttributes(identity, route.attributes),
+      ...withRootSpanAttributes(identity, route.attributes, appAttributes),
     });
   };
 

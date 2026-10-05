@@ -6,7 +6,7 @@ import { createCheck, SERVICE_ID } from './check.mjs';
 export async function runAdonisScenario({ name, appRoot, importer, middlewareImport, AppFactory, ServerFactory, ExceptionHandler, sdk }) {
   const check = createCheck(name);
   const receiver = await startReceiver();
-  sdk.StackTrace.init({ apiKey: 'k', serviceId: SERVICE_ID, endpoint: receiver.url });
+  sdk.StackTrace.init({ apiKey: 'k', serviceId: SERVICE_ID, endpoint: receiver.url, identityOnSpans: true });
   const app = new AppFactory().create(appRoot, importer);
   await app.init();
   const server = new ServerFactory().merge({ app }).create();
@@ -36,7 +36,7 @@ export async function runAdonisScenario({ name, appRoot, importer, middlewareImp
   node.closeAllConnections?.();
   await new Promise((resolve) => node.close(resolve));
   await sdk.StackTrace.shutdown();
-  checkHttpTelemetry(check, receiver, statuses);
+  checkHttpTelemetry(check, receiver, statuses, { identityOnSpans: true });
   await receiver.close();
   check.done();
 }

@@ -2,7 +2,7 @@ import { randomBytes } from 'node:crypto';
 import type { Request, Response, NextFunction } from 'express';
 import { getStackTraceClient } from '../index.js';
 import type { StackTraceClient } from '../core/stacktrace-client.js';
-import { runWithRequestContext, type HttpRequestSnapshot } from '../core/request-context.js';
+import { readRequestScopeIdentity, runWithRequestContext, type HttpRequestSnapshot } from '../core/request-context.js';
 import { isTelemetryActive, safeRun } from '../core/safe-run.js';
 import { runWithTraceContext } from '../core/trace-span-context.js';
 import { extractCorrelationFromHeaders } from '../utils/correlation.js';
@@ -13,6 +13,7 @@ import { httpRootSpanOutcome } from './http-root-span-outcome.js';
 import { httpRootSpanRoute } from './http-root-span-route.js';
 import { httpRootSpanIdentity, withRootSpanAttributes } from './http-root-span-identity.js';
 import { completeLocalRoot, recordBoundaryError } from '../core/error-tracking.js';
+import { takeRootSpanAttributes } from '../core/root-span-attributes.js';
 import { warnRemovedCaptureErrors } from './removed-options.js';
 
 export type StacktraceExpressOptions = {
@@ -83,6 +84,7 @@ function prepareRequest(req: Request, res: Response, client: StackTraceClient | 
       remoteParentSpanId: correlation.parentSpanId,
       statusCode: res.statusCode,
     });
+    const appAttributes = takeRootSpanAttributes(traceId, rootSpanId, () => readRequestScopeIdentity(snapshot));
     if (!client) return;
     const endMs = Date.now();
     const durationMs = endMs - start;
@@ -105,7 +107,7 @@ function prepareRequest(req: Request, res: Response, client: StackTraceClient | 
       ...httpRootSpanOutcome(aborted, res.statusCode, boundaryError),
       http_method: req.method,
       http_route: route.http_route,
-      ...withRootSpanAttributes(identity, route.attributes),
+      ...withRootSpanAttributes(identity, route.attributes, appAttributes),
     });
   };
 

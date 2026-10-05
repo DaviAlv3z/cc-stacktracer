@@ -394,3 +394,138 @@ describe('db-lucid com o serviço db do Lucid (3.3)', () => {
     await vi.waitFor(() => expect(spans(transport)).toHaveLength(1));
   });
 });
+
+describe('db-lucid 3.4: SQL, parâmetros, banco, conexão e erro do driver', () => {
+  afterEach(async () => {
+    clearPluginsForTests();
+    vi.restoreAllMocks();
+    await shutdown();
+  });
+
+  /** Conexão aberta antes do plugin, com nome e banco — como o `ConnectionNode` do Lucid. */
+  function lucidWithDatabase(): { service: Parameters<typeof createLucidStackTracePlugin>[0]; knex: EventEmitter } {
+    const knex = new EventEmitter();
+    const config = { client: 'pg', connection: { host: 'db', database: 'prefeitura', password: 'segredo' } };
+    const connections = new Map([
+      ['tenant_main', { name: 'tenant_main', config, connection: { client: knex, readClient: knex } }],
+    ]);
+    return { service: { manager: { connections }, emitter: new EventEmitter() } as never, knex };
+  }
+
+  function emitQuery(knex: EventEmitter, uid: string, sql: string, bindings: unknown[], error?: Error): Promise<void> {
+    return runWithTraceContext(traceId, rootSpanId, async () => {
+      const q = { __knexUid: 'c', __knexQueryUid: uid, sql, bindings, method: 'insert' };
+      knex.emit('query', q);
+      if (error !== undefined) knex.emit('query-error', error, q);
+      else knex.emit('query-response', [], q, {});
+    });
+  }
+
+  it('sem opções: nem SQL nem parâmetros, mas banco e conexão (nunca a senha)', async () => {
+    const transport = setup();
+    const { service, knex } = lucidWithDatabase();
+    await createLucidStackTracePlugin(service).init(pluginCtx);
+    await emitQuery(knex, 'u1', 'insert into "users" ("email") values ($1)', ['fulano@x.com']);
+    await vi.waitFor(() => expect(spans(transport)).toHaveLength(1));
+    const span = spans(transport)[0]!;
+    expect(span.attributes).toEqual({ 'db.namespace': 'prefeitura', 'db.connection': 'tenant_main' });
+    expect(JSON.stringify(span)).not.toMatch(/fulano|segredo/);
+  });
+
+  it('statement + parameters masked: SQL com placeholder e bindings mascarados', async () => {
+    const transport = setup();
+    const { service, knex } = lucidWithDatabase();
+    await createLucidStackTracePlugin(service, { statement: true, parameters: 'masked' }).init(pluginCtx);
+    await emitQuery(knex, 'u2', 'insert into "users" ("email", "id", "uid") values ($1, $2, $3)', [
+      'fulano@x.com',
+      42,
+      '0b6f3c1e-1d2a-4f5b-9c8d-7e6f5a4b3c2d',
+    ]);
+    await vi.waitFor(() => expect(spans(transport)).toHaveLength(1));
+    expect(spans(transport)[0]!.attributes).toMatchObject({
+      db_statement: 'insert into "users" ("email", "id", "uid") values ($1, $2, $3)',
+      db_parameters: ['[string:12]', 42, '0b6f3c1e-1d2a-4f5b-9c8d-7e6f5a4b3c2d'],
+    });
+  });
+
+  it('parameters types esconde números também; statement corta em 4.000', async () => {
+    const transport = setup();
+    const { service, knex } = lucidWithDatabase();
+    await createLucidStackTracePlugin(service, { statement: true, parameters: 'types' }).init(pluginCtx);
+    const longo = `select * from "t" where ${'x = ? and '.repeat(600)}1 = 1`;
+    await emitQuery(knex, 'u3', longo, [12345678900, true, null, new Date(), Buffer.from('ab')]);
+    await vi.waitFor(() => expect(spans(transport)).toHaveLength(1));
+    const attributes = spans(transport)[0]!.attributes!;
+    expect(attributes.db_parameters).toEqual(['[number]', true, null, '[date]', '[binary:2]']);
+    expect((attributes.db_statement as string).length).toBe(4_000);
+  });
+
+  it('attributes: lidos no início da query; os do SDK vencem; função que lança é ignorada', async () => {
+    const transport = setup();
+    const { service, knex } = lucidWithDatabase();
+    let tenant = 'pm-peruibe';
+    await createLucidStackTracePlugin(service, {
+      attributes: () => ({ subtenant: tenant, db_system: 'invasor' }),
+    }).init(pluginCtx);
+    await emitQuery(knex, 'u4', 'select 1', []);
+    tenant = 'outro';
+    await vi.waitFor(() => expect(spans(transport)).toHaveLength(1));
+    expect(spans(transport)[0]).toMatchObject({ db_system: 'postgres', attributes: { subtenant: 'pm-peruibe' } });
+
+    clearPluginsForTests();
+    const outro = lucidWithDatabase();
+    await createLucidStackTracePlugin(outro.service, {
+      attributes: () => {
+        throw new Error('hook quebrado');
+      },
+    }).init(pluginCtx);
+    await expect(emitQuery(outro.knex, 'u5', 'select 2', [])).resolves.toBeUndefined();
+    await vi.waitFor(() => expect(spans(transport)).toHaveLength(2));
+  });
+
+  it('erro do driver: db.error.* no span, sem o detail (que traz o valor)', async () => {
+    const transport = setup();
+    const { service, knex } = lucidWithDatabase();
+    await createLucidStackTracePlugin(service).init(pluginCtx);
+    const pgError = Object.assign(new Error('duplicate key value violates unique constraint "users_email_unique"'), {
+      name: 'error',
+      severity: 'ERROR',
+      code: '23505',
+      constraint: 'users_email_unique',
+      table: 'users',
+      detail: 'Key (email)=(fulano@x.com) already exists.',
+    });
+    await emitQuery(knex, 'u6', 'insert into "users" ("email") values ($1)', ['fulano@x.com'], pgError);
+    await vi.waitFor(() => expect(spans(transport)).toHaveLength(1));
+    const span = spans(transport)[0]!;
+    expect(span.status).toBe('error');
+    expect(span.attributes).toMatchObject({
+      'db.error.kind': 'constraint',
+      'db.error.code': '23505',
+      'db.error.constraint': 'users_email_unique',
+    });
+    expect(JSON.stringify(span.attributes)).not.toContain('fulano');
+  });
+
+  it('auto({ lucid, lucidOptions }) repassa as opções ao plugin', async () => {
+    const transport = vi.fn().mockResolvedValue(undefined);
+    const { service, knex } = lucidWithDatabase();
+    await auto({
+      apiKey: 'k',
+      serviceId,
+      service: 'svc',
+      environment: 'test',
+      endpoint: 'https://ingest.example.com',
+      sendMode: 'immediate',
+      transport,
+      lucid: service,
+      lucidOptions: { statement: true, parameters: 'masked' },
+    });
+    await emitQuery(knex, 'u7', 'select * from "users" where "id" = $1', [7]);
+    await vi.waitFor(() => expect(spans(transport)).toHaveLength(1));
+    expect(spans(transport)[0]!.attributes).toMatchObject({
+      db_statement: 'select * from "users" where "id" = $1',
+      db_parameters: [7],
+    });
+  });
+});

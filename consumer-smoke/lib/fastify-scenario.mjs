@@ -11,7 +11,7 @@ export async function runFastifyScenario({ name, Fastify, sdk, plugin, pluginAbs
   });
   check.ok(pluginAbsent, 'fastify-plugin ausente do projeto (o cliente sem @fastify/*)');
   const receiver = await startReceiver();
-  sdk.StackTrace.init({ apiKey: 'k', serviceId: SERVICE_ID, endpoint: receiver.url });
+  sdk.StackTrace.init({ apiKey: 'k', serviceId: SERVICE_ID, endpoint: receiver.url, identityOnSpans: true });
   const app = Fastify();
   await app.register(plugin);
   app.get('/users/:id', async (req) => {
@@ -25,7 +25,7 @@ export async function runFastifyScenario({ name, Fastify, sdk, plugin, pluginAbs
   const statuses = await runHttpScript(`http://127.0.0.1:${app.server.address().port}`);
   await app.close();
   await sdk.StackTrace.shutdown();
-  checkHttpTelemetry(check, receiver, statuses);
+  checkHttpTelemetry(check, receiver, statuses, { identityOnSpans: true });
   check.equal(deprecations, [], 'nenhum DeprecationWarning do Fastify provocado pelo SDK');
   await receiver.close();
   check.done();

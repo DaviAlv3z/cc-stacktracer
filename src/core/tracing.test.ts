@@ -9,6 +9,7 @@ import { beginOutboundSpan, endOutboundSpan, endSpan, startSpan, withSpan, withT
 import { resetErrorTrackingState } from './error-tracking.js';
 import type { SdkSpanRow } from './span-payload.types.js';
 import { resetFailOpenState } from './safe-run.js';
+import { getScopeContextForMerge, resetScopeMetadata, setTags, setUser } from './scope-metadata.js';
 
 const serviceId = '11111111-1111-4111-8111-111111111111';
 
@@ -356,5 +357,21 @@ describe('error tracking nos spans (3.0)', () => {
       .find((r) => r.span_name === 'GET api.example.com');
     expect(outbound?.status).toBe('error');
     expect(enqueue).not.toHaveBeenCalled();
+  });
+});
+
+describe('withTrace — escopo proprio', () => {
+  // Até a 3.3.0 o job rodava sem escopo: setUser/setTags dentro dele gravavam no escopo GLOBAL do processo, e
+  // as requisições seguintes saíam com o usuário e o subtenant do job.
+  it('setUser e setTags dentro do job nao vazam para fora dele', async () => {
+    resetScopeMetadata();
+    let dentro: Record<string, unknown> | undefined;
+    await withTrace('job.lote', () => {
+      setUser({ id: 'usuario-do-job' });
+      setTags({ subtenant: 'cliente-do-job' });
+      dentro = getScopeContextForMerge();
+    });
+    expect(dentro).toMatchObject({ user: { id: 'usuario-do-job' }, tags: { subtenant: 'cliente-do-job' } });
+    expect(getScopeContextForMerge()).toBeUndefined();
   });
 });

@@ -11,6 +11,8 @@ export type SdkInitConfig = {
   projectId?: string;
   /** Resolvida no `init` (opcao > env > padrao). Ausente = padrao. */
   errorTracking?: ErrorTrackingConfig;
+  /** `init({ identityOnSpans })`: `user.id` e `subtenant` do escopo nos spans. */
+  identityOnSpans?: boolean;
 };
 
 let client: StackTraceClient | null = null;

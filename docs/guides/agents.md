@@ -76,6 +76,13 @@ See `docs/guides/integration-adonis.en-US.md`.
 
 Without database spans there is no waterfall, and "the request is slow" has no answer.
 
+- **Measure each query once.** Never wrap a query that a plugin already instruments (Lucid, the Prisma
+  extension) in `runQuery` or `measure({ kind: 'db' })`: that is a second `db` span for the same query, and the
+  dashboard counts it twice. Name a group of queries with `withSpan(name, fn, { type: 'business' })`.
+- **SQL on database spans (3.4)**: `auto({ lucid: db, lucidOptions: { statement: true, parameters: 'masked' } })`
+  sends the SQL with placeholders in `db_statement` and the bindings masked in `db_parameters`. Never put SQL with
+  values, or raw bindings, in an attribute yourself.
+
 ## 6. User identity and multi-tenant
 
 ```ts
@@ -96,6 +103,13 @@ await StackTrace.withSpan('process-order', () => service.process(data), {
 **There is no `withSubtenant()`, `setSubtenant()` or any scope API for this.** If you are about to
 suggest one because a similar library has it, stop — it will fail at runtime. The field is a payload
 field by design: in a real multi-tenant app the customer is only known after authentication.
+
+**SDK 3.4**: mark the request once, after authentication — `StackTrace.setUser({ id })` and
+`StackTrace.setTags({ subtenant: customer.slug })` — and turn on `init({ identityOnSpans: true })`. Every log and
+error of the request carries both, and so do the root span (read when the request ends) and every span started
+after the marking. In a job, do it inside `withTrace`, which has its own scope. Never call `setUser`/`setTags`
+outside a request or `withTrace`: there they apply to the whole process. Other root span attributes:
+`StackTrace.setRootSpanAttributes({ ... })`.
 
 Use a readable slug, never a UUID or a user id: the value is shown raw in filters, and high
 cardinality trips the `subtenant_cardinality` audit check.

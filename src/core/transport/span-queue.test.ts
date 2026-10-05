@@ -289,3 +289,29 @@ describe('SpanQueue fail-open', () => {
     full.stop();
   });
 });
+
+describe('SpanQueue — flushPending logo depois de enfileirar', () => {
+  const microtasks = async (n: number): Promise<void> => {
+    for (let i = 0; i < n; i += 1) await Promise.resolve();
+  };
+
+  it('entrega tudo, qualquer que seja o intervalo entre os enqueues e o flush', async () => {
+    const falhas: string[] = [];
+    for (let gapA = 0; gapA <= 6; gapA += 1) {
+      for (let gapB = 0; gapB <= 4; gapB += 1) {
+        const deliver = vi.fn<(batch: SdkSpanRow[]) => Promise<void>>().mockResolvedValue(undefined);
+        const q = new SpanQueue({ sendMode: 'batch', maxBatchSize: 50, flushIntervalMs: 60_000, deliver });
+        q.enqueue(span('a'));
+        await microtasks(gapA);
+        q.enqueue(span('b'));
+        await microtasks(gapB);
+        await q.flushPending({ ignoreBackoff: true });
+        const entregues = deliver.mock.calls.flatMap(([batch]) => batch.map((s) => s.span_id));
+        if (entregues.join(',') !== 'a,b' || q.pendingCount() !== 0)
+          falhas.push(`${gapA},${gapB}: ${entregues.join(',')}`);
+        q.stop();
+      }
+    }
+    expect(falhas).toEqual([]);
+  });
+});

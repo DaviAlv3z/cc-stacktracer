@@ -48,8 +48,10 @@ function hashEmail(email: string): string {
  * é o que faz as duas metades dessa frase serem verdadeiras ao mesmo tempo.
  */
 export function runWithScope<T>(fn: () => T): T {
-  const parent = current();
-  return storage.run({ user: parent.user, tags: new Map(parent.tags) }, fn);
+  const parent = storage.getStore();
+  // Do fallback, só as tags (as de boot). O usuário do fallback é de quem chamou `setUser` fora de escopo — um
+  // job, um script —, e herdá-lo atribuía esse usuário a toda requisição seguinte, anônimas inclusive (até a 3.3.0).
+  return storage.run({ user: parent?.user, tags: new Map((parent ?? fallback).tags) }, fn);
 }
 
 /**
@@ -91,6 +93,29 @@ export function clearTags(): void {
 export function resetScopeMetadata(): void {
   fallback.user = undefined;
   fallback.tags.clear();
+}
+
+/** `user.id` (de `setUser`) e `subtenant` (da tag) de um escopo: o que `identityOnSpans` põe nos spans. */
+function identityOf(state: ScopeState): Record<string, string> | undefined {
+  const out: Record<string, string> = {};
+  if (state.user !== undefined && state.user.id !== '') out['user.id'] = state.user.id;
+  const subtenant = state.tags.get('subtenant');
+  if (subtenant !== undefined && subtenant.trim() !== '') out.subtenant = subtenant;
+  return Object.keys(out).length > 0 ? out : undefined;
+}
+
+/** Identidade do escopo ATUAL. */
+export function scopeIdentityAttributes(): Record<string, string> | undefined {
+  return identityOf(current());
+}
+
+/**
+ * Leitor preso ao escopo atual, lido depois. O span raiz HTTP sai no `finish` da resposta, que pode rodar fora do
+ * contexto da requisição; o `setUser` do auth, que veio depois de o raiz abrir, ainda aparece nele.
+ */
+export function captureScopeIdentityReader(): () => Record<string, string> | undefined {
+  const state = current();
+  return () => identityOf(state);
 }
 
 export function getScopeContextForMerge(): Record<string, unknown> | undefined {

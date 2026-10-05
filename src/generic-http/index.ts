@@ -1,8 +1,9 @@
 import { randomBytes } from 'node:crypto';
 import { getStackTraceClient } from '../index.js';
-import { runWithRequestContext, type HttpRequestSnapshot } from '../core/request-context.js';
+import { readRequestScopeIdentity, runWithRequestContext, type HttpRequestSnapshot } from '../core/request-context.js';
 import { runWithTraceContext } from '../core/trace-span-context.js';
 import { completeLocalRoot, recordBoundaryError } from '../core/error-tracking.js';
+import { takeRootSpanAttributes } from '../core/root-span-attributes.js';
 import { httpRootSpanOutcome } from '../integrations/http-root-span-outcome.js';
 import { httpRootSpanRoute, UNMATCHED_HTTP_ROUTE } from '../integrations/http-root-span-route.js';
 import {
@@ -257,6 +258,9 @@ export class StackTraceHttpRequest {
       remoteParentSpanId: this.remoteParentSpanId,
       statusCode: response.statusCode,
     });
+    const appAttributes = takeRootSpanAttributes(this.traceId, this.rootSpanId, () =>
+      readRequestScopeIdentity(this.snapshot),
+    );
 
     const client = getStackTraceClient();
     if (!client) return;
@@ -288,7 +292,7 @@ export class StackTraceHttpRequest {
       http_status_code: response.statusCode,
       error_type: outcome.error_type,
       error_message: outcome.error_message,
-      ...withRootSpanAttributes(this.identity, route.attributes),
+      ...withRootSpanAttributes(this.identity, route.attributes, appAttributes),
     });
   }
 }

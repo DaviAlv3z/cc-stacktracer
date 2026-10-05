@@ -14,6 +14,9 @@ import {
 } from './trace-span-context.js';
 import { getBusinessContext } from './business-context.js';
 import { completeLocalRoot, recordSpanError } from './error-tracking.js';
+import { runWithScope, scopeIdentityAttributes } from './scope-metadata.js';
+import { PROMOTED_SPAN_ATTR_KEYS } from './span-attribute-keys.js';
+import { takeRootSpanAttributes } from './root-span-attributes.js';
 
 export type SpanOptions = {
   type?: 'http' | 'db' | 'business' | 'service' | 'external';
@@ -38,19 +41,6 @@ function numAttr(attrs: Record<string, unknown> | undefined, key: string): numbe
   const v = attrs[key];
   return typeof v === 'number' && !Number.isNaN(v) ? v : undefined;
 }
-
-/** Attribute keys promoted to dedicated span columns — excluded from the free-form `attributes`. */
-const PROMOTED_SPAN_ATTR_KEYS = new Set<string>([
-  'http_method',
-  'http_route',
-  'http_status_code',
-  'db_system',
-  'db_operation',
-  'db_table',
-  'db_duration_ms',
-  'db_duration_us',
-  'trace_flags',
-]);
 
 function spanAttributes(attrs: Record<string, unknown> | undefined): Record<string, unknown> | null {
   if (attrs === undefined) return null;
@@ -109,6 +99,8 @@ function buildRow(params: {
    * com erro, mas nao ha excecao de verdade para o Error Tracking — sem stack nao ha issue, como no Datadog.
    */
   trackError?: boolean;
+  /** Identidade capturada no INICIO (span de saida: o fim pode rodar fora do contexto). Ausente = a do escopo atual. */
+  identity?: Record<string, string> | undefined;
 }): SdkSpanRow | null {
   const { client, initConfig } = getSdkRuntime();
   if (!client || !initConfig) {
@@ -119,7 +111,10 @@ function buildRow(params: {
     return null;
   }
 
-  const attrs = mergeBusinessAttributes(params.options?.attributes);
+  const explicit = mergeBusinessAttributes(params.options?.attributes);
+  // `identityOnSpans`: user.id e subtenant do escopo, por baixo dos atributos explicitos.
+  const identity = initConfig.identityOnSpans === true ? (params.identity ?? scopeIdentityAttributes()) : undefined;
+  const attrs = identity !== undefined ? { ...identity, ...explicit } : explicit;
   // `http` e o span de SERVIDOR — o que as metricas contam como requisicao recebida. Um span filho com
   // type 'http' (`withSpan(..., { type: 'http' })`, `measure(..., { kind: 'http' })`) e trabalho feito
   // DENTRO da requisicao, em geral uma chamada de saida: contado como requisicao, inflava throughput,
@@ -242,6 +237,10 @@ function beginRootSpan(options: SpanOptions | undefined): RootSpanStart {
 }
 
 function finishRootSpan(root: RootSpanStart, name: string, err?: Error): void {
+  // `setRootSpanAttributes` dentro do job: o mais recente vence o que veio nas opcoes do `withTrace`.
+  const extra = takeRootSpanAttributes(root.traceId, root.spanId);
+  const options: SpanOptions =
+    extra === undefined ? root.options : { ...root.options, attributes: { ...root.options.attributes, ...extra } };
   const row = buildRow({
     name,
     spanId: root.spanId,
@@ -250,7 +249,7 @@ function finishRootSpan(root: RootSpanStart, name: string, err?: Error): void {
     endIso: new Date().toISOString(),
     durationUs: (performance.now() - root.perfStart) * 1000,
     traceId: root.traceId,
-    options: root.options,
+    options,
     ...(err !== undefined ? { err } : {}),
   });
   if (row !== null) {
@@ -268,6 +267,9 @@ function finishRootSpan(root: RootSpanStart, name: string, err?: Error): void {
  *
  * Dentro de um trace já ativo, delega para {@link withSpan}: um job disparado de dentro de uma requisição
  * pertence ao trace DELA, e abrir um segundo trace partiria a história em duas.
+ *
+ * O job roda num escopo PRÓPRIO de `setUser`/`setTags`, como uma requisição. Até a 3.3.0 ele não tinha escopo:
+ * o que o job marcava ia para o escopo global do processo e saía nas requisições seguintes.
  */
 export async function withTrace<T>(name: string, fn: () => Promise<T> | T, options?: SpanOptions): Promise<T> {
   if (getTraceIdFromContext() !== undefined) {
@@ -277,20 +279,22 @@ export async function withTrace<T>(name: string, fn: () => Promise<T> | T, optio
   if (root === undefined) {
     return fn();
   }
-  return runWithTraceContext(root.traceId, root.spanId, async () => {
-    let out: Awaited<T>;
-    try {
-      out = await fn();
-    } catch (err) {
-      safeRun('withTrace.end', () => finishRootSpan(root, name, asError(err)));
+  return runWithScope(() =>
+    runWithTraceContext(root.traceId, root.spanId, async () => {
+      let out: Awaited<T>;
+      try {
+        out = await fn();
+      } catch (err) {
+        safeRun('withTrace.end', () => finishRootSpan(root, name, asError(err)));
+        completeLocalRoot({ traceId: root.traceId, rootSpanId: root.spanId });
+        throw err;
+      }
+      safeRun('withTrace.end', () => finishRootSpan(root, name));
+      // Mesmo com o job bem-sucedido: um erro tratado la dentro (fallback) ainda e o erro desta raiz.
       completeLocalRoot({ traceId: root.traceId, rootSpanId: root.spanId });
-      throw err;
-    }
-    safeRun('withTrace.end', () => finishRootSpan(root, name));
-    // Mesmo com o job bem-sucedido: um erro tratado la dentro (fallback) ainda e o erro desta raiz.
-    completeLocalRoot({ traceId: root.traceId, rootSpanId: root.spanId });
-    return out;
-  });
+      return out;
+    }),
+  );
 }
 
 /**
@@ -344,6 +348,8 @@ export type OutboundSpanStart = {
   traceFlags: string;
   startIso: string;
   perfStart: number;
+  /** `identityOnSpans`: a identidade do escopo no inicio da chamada. */
+  identity?: Record<string, string>;
 };
 
 /** Begins an outbound client span from the active trace, or returns `null` when no trace is active. */
@@ -357,6 +363,7 @@ export function beginOutboundSpan(): OutboundSpanStart | null {
       if (ctx === undefined) {
         return null;
       }
+      const identity = getSdkRuntime().initConfig?.identityOnSpans === true ? scopeIdentityAttributes() : undefined;
       return {
         traceId: ctx.traceId,
         spanId: newSpanId(),
@@ -364,6 +371,7 @@ export function beginOutboundSpan(): OutboundSpanStart | null {
         traceFlags: ctx.traceFlags,
         startIso: new Date().toISOString(),
         perfStart: performance.now(),
+        ...(identity !== undefined ? { identity } : {}),
       };
     }) ?? null
   );
@@ -397,6 +405,7 @@ export function endOutboundSpan(
       options,
       ...(params.err !== undefined ? { err: params.err } : {}),
       trackError: params.errorFromStatus !== true,
+      identity: begin.identity,
     });
     if (row !== null) {
       getSdkRuntime().client?.enqueueSpan(row);

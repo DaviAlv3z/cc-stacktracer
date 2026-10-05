@@ -16,7 +16,8 @@ São dois recortes diferentes, e só um é seu:
 ## Não existe API para isto
 
 Não há `withSubtenant()`, `setSubtenant()` nem nada parecido. Se um assistente de código sugerir uma,
-ele inventou: vai quebrar em runtime.
+ele inventou: vai quebrar em runtime. O que existe é a tag `subtenant` do escopo da requisição
+(`setTags({ subtenant })`, abaixo), além do campo de payload em cada envio.
 
 O `subtenant` é um **campo opcional de payload**. Você o inclui no envio, como incluiria qualquer
 outro dado de contexto. Foi desenhado assim porque, numa aplicação multi-tenant de verdade, o cliente
@@ -24,6 +25,21 @@ só é conhecido depois da autenticação — às vezes depois de uma consulta a
 exigiria o valor cedo demais.
 
 ## Onde o valor vai
+
+### A requisição inteira (SDK 3.4)
+
+Marque uma vez, logo depois da autenticação — no middleware de auth ou de tenant:
+
+```ts
+StackTrace.setUser({ id: String(user.id) });
+StackTrace.setTags({ subtenant: cliente.slug });
+```
+
+Todo log e todo erro daquela requisição levam o valor (`tags.subtenant`, que o servidor lê como o campo de
+payload). Com `init({ identityOnSpans: true })`, os spans também: o span raiz da requisição — lido quando ela
+termina — e todo span criado depois da marcação (banco, chamadas de saída, `withSpan`). Num job, faça o mesmo
+dentro do `withTrace`, que tem escopo próprio. Nunca chame `setTags({ subtenant })` fora de uma requisição ou
+de um `withTrace`: ali ele vai para o escopo do processo inteiro.
 
 ### Erros e logs
 
@@ -48,7 +64,7 @@ await StackTrace.withSpan(
 
 Note a ordem dos argumentos: `withSpan(nome, fn, options)`. A função vem **antes** das opções.
 
-## Um span por requisição basta
+## Um span por requisição basta (antes da 3.4, ou sem `identityOnSpans`)
 
 Esta é a parte que economiza a maior parte do trabalho.
 
@@ -68,12 +84,14 @@ await StackTrace.withSpan('processa-manifestacao', () => serviço.processar(dado
 
 ## O que não carrega o valor
 
-Spans criados automaticamente pelo SDK — o HTTP raiz do plugin de framework e os de banco do
-Prisma/Lucid — **nunca** têm o `subtenant`. Eles nascem antes de você saber quem é o cliente, e não há
-API para anotar um span já iniciado.
+Sem `identityOnSpans` (e nos SDKs anteriores à 3.4), os spans criados automaticamente pelo SDK — o HTTP raiz
+do plugin de framework e os de banco do Prisma/Lucid — **nunca** têm o `subtenant`.
 
-Isso não é problema na tela de traces, pela regra acima. Mas explica por que um span de banco isolado
-aparece sem o campo.
+Com `identityOnSpans`, o span raiz leva o valor (ele é lido quando a requisição termina), e todo span criado
+depois do `setTags({ subtenant })` também. O que continua sem: os spans que rodaram antes da marcação —
+tipicamente as queries do próprio auth, que rodam antes de se saber quem é o cliente. Isso não é problema na
+tela de traces, pela regra acima. Para pôr outros atributos no span raiz, use
+`StackTrace.setRootSpanAttributes({ ... })`.
 
 ## Use slug, não id
 

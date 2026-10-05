@@ -5,7 +5,7 @@ import { createCheck, SERVICE_ID } from './check.mjs';
 export async function runExpressScenario({ name, express, sdk, integration }) {
   const check = createCheck(name);
   const receiver = await startReceiver();
-  sdk.StackTrace.init({ apiKey: 'k', serviceId: SERVICE_ID, endpoint: receiver.url });
+  sdk.StackTrace.init({ apiKey: 'k', serviceId: SERVICE_ID, endpoint: receiver.url, identityOnSpans: true });
   const app = express();
   app.use(integration.stacktraceExpressMiddleware());
   app.get('/users/:id', async (req, res, next) => {
@@ -25,7 +25,7 @@ export async function runExpressScenario({ name, express, sdk, integration }) {
   server.closeAllConnections?.();
   await new Promise((resolve) => server.close(resolve));
   await sdk.StackTrace.shutdown();
-  checkHttpTelemetry(check, receiver, statuses);
+  checkHttpTelemetry(check, receiver, statuses, { identityOnSpans: true });
   await receiver.close();
   check.done();
 }

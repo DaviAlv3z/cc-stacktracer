@@ -2,6 +2,10 @@ import { extractSqlVerb } from '../performance/measure.js';
 import { beginOutboundSpan, endOutboundSpan, type OutboundSpanStart } from '../core/tracing.js';
 import type { StackTracePlugin } from '../core/plugins/types.js';
 import { safeRun } from '../core/safe-run.js';
+import { errorFields } from '../utils/error-fields.js';
+import { maskDbParameters, type DbParametersMode } from './db-parameters.js';
+
+export type { DbParametersMode } from './db-parameters.js';
 
 /**
  * Knex / Lucid connection that supports the `query`, `query-response` and `query-error` events.
@@ -35,6 +39,7 @@ type LucidEmitter = { on(event: string, listener: (connection: unknown) => void)
 type KnexQueryEvent = {
   __knexQueryUid?: string;
   sql?: string;
+  bindings?: unknown;
   method?: string;
 };
 
@@ -54,9 +59,24 @@ export const MAX_PENDING_LUCID_QUERIES = 1000;
 /** Bulk insert pode ter megabytes de SQL; verbo e tabela estão sempre no começo do texto. */
 const MAX_SQL_SCAN_CHARS = 8_192;
 
+/** O teto do `db_statement` no contrato de eventos da plataforma. */
+export const MAX_DB_STATEMENT_CHARS = 4_000;
+
 export type LucidStackTracePluginOptions = {
   /** Real database engine name, e.g. `postgres`, `mysql`, or `sqlserver`. Default: inferred from the driver. */
   dbSystem?: string;
+  /**
+   * Envia o SQL em `db_statement` (até 4.000 caracteres) como o knex o executa: com PLACEHOLDERS (`$1`, `?`), nunca
+   * com os valores — desde que a app use bindings. Padrão `false`.
+   */
+  statement?: boolean;
+  /** Bindings em `db_parameters`: `'off'` (padrão), `'types'` ou `'masked'`. Ver {@link DbParametersMode}. */
+  parameters?: DbParametersMode;
+  /**
+   * Atributos extras de cada span de banco, lidos quando a query começa, no contexto de quem a chamou. Função que
+   * lança é ignorada; os atributos do SDK (`db_*`, `db.*`) vencem os daqui.
+   */
+  attributes?: () => Record<string, unknown> | undefined;
 };
 
 /** Driver do knex → engine real. `db_system` é o banco, nunca o ORM. */
@@ -144,8 +164,18 @@ function inferDbSystem(knex: object, connectionConfig: unknown): string | undefi
   return name === undefined ? undefined : (DB_SYSTEM_BY_DRIVER[name] ?? name);
 }
 
+/** O banco da conexão (`connection.database`): com várias conexões, ou um banco por tenant, diz QUAL. */
+function databaseName(knex: object, connectionConfig: unknown): string | undefined {
+  const read = (config: unknown): string | undefined => {
+    const database = (config as { connection?: { database?: unknown } } | null | undefined)?.connection?.database;
+    return typeof database === 'string' && database !== '' ? database.slice(0, 256) : undefined;
+  };
+  return read(connectionConfig) ?? read((knex as { client?: { config?: unknown } }).client?.config);
+}
+
 /**
- * Emits DB spans for completed queries without sending raw SQL or bindings.
+ * Emits DB spans for completed queries. SQL e bindings só com `statement` / `parameters` (opt-in): o SQL com
+ * placeholders, os bindings mascarados.
  *
  * Aceita o serviço `db` do Lucid — instrumenta cada conexão, as já abertas e as que o Lucid abrir depois
  * (ele conecta sob demanda, na primeira query) — ou um knex direto. O knex emite `query` antes do
@@ -161,7 +191,11 @@ export function createLucidStackTracePlugin(
     init() {
       const pending = new Map<string, PendingQuerySpan>();
 
-      const start = (query: unknown, dbSystem: string): void => {
+      const parametersMode = options.parameters ?? 'off';
+      const extraAttributes = (): Record<string, unknown> | undefined =>
+        options.attributes === undefined ? undefined : safeRun('lucid.attributes', () => options.attributes?.());
+
+      const start = (query: unknown, base: Record<string, unknown>): void => {
         const q = query as KnexQueryEvent | null | undefined;
         const uid = q?.__knexQueryUid;
         if (q === null || q === undefined || typeof uid !== 'string' || uid === '') return;
@@ -171,13 +205,21 @@ export function createLucidStackTracePlugin(
         const verb = extractSqlVerb(sql) ?? (q.method !== undefined ? q.method.toUpperCase() : undefined);
         const table = inferTable(sql, verb);
         const operationName = inferOperationName(verb, table);
+        const statement =
+          options.statement === true && typeof q.sql === 'string' && q.sql !== ''
+            ? q.sql.slice(0, MAX_DB_STATEMENT_CHARS)
+            : undefined;
+        const parameters = maskDbParameters(q.bindings, parametersMode);
         pending.set(uid, {
           begin,
           operationName,
           attributes: {
-            db_system: dbSystem,
+            ...extraAttributes(),
+            ...base,
             db_operation: verb ?? operationName,
             ...(table !== undefined ? { db_table: table } : {}),
+            ...(statement !== undefined ? { db_statement: statement } : {}),
+            ...(parameters !== undefined ? { db_parameters: parameters } : {}),
           },
         });
         if (pending.size > MAX_PENDING_LUCID_QUERIES) {
@@ -195,19 +237,28 @@ export function createLucidStackTracePlugin(
         endOutboundSpan(entry.begin, {
           name: entry.operationName,
           type: 'db',
-          attributes: entry.attributes,
+          // Com erro: SQLSTATE, constraint, código do driver. O `error_type` do pg é "error" e não distingue nada.
+          attributes: err !== undefined ? { ...entry.attributes, ...errorFields(err) } : entry.attributes,
           ...(err !== undefined ? { err } : {}),
         });
       };
 
-      const instrumentKnex = (knex: unknown, connectionConfig?: unknown): void => {
+      const instrumentKnex = (knex: unknown, connectionConfig?: unknown, connectionName?: unknown): void => {
         if (!isKnexLike(knex) || instrumentedKnex.has(knex)) return;
         instrumentedKnex.add(knex);
-        const dbSystem = options.dbSystem ?? inferDbSystem(knex, connectionConfig) ?? 'unknown';
+        const database = databaseName(knex, connectionConfig);
+        // Iguais para toda query deste knex: o engine, o banco e o nome da conexão no Lucid.
+        const base: Record<string, unknown> = {
+          db_system: options.dbSystem ?? inferDbSystem(knex, connectionConfig) ?? 'unknown',
+          ...(database !== undefined ? { 'db.namespace': database } : {}),
+          ...(typeof connectionName === 'string' && connectionName !== ''
+            ? { 'db.connection': connectionName.slice(0, 256) }
+            : {}),
+        };
         // O knex emite estes eventos de dentro do executor da query: um throw aqui voltaria para a query
         // do cliente. Cada listener é dono da própria falha.
         knex.on('query', (query: unknown) => {
-          safeRun('lucid.query', () => start(query, dbSystem));
+          safeRun('lucid.query', () => start(query, base));
         });
         knex.on('query-response', (_response: unknown, query: unknown) => {
           safeRun('lucid.queryResponse', () => finish(query));
@@ -218,15 +269,18 @@ export function createLucidStackTracePlugin(
       };
 
       if (isLucidDatabaseService(database)) {
-        const instrumentConnection = (connection: unknown, config?: unknown): void => {
-          const c = connection as { client?: unknown; readClient?: unknown; config?: unknown } | null | undefined;
-          instrumentKnex(c?.client, config ?? c?.config);
-          instrumentKnex(c?.readClient, config ?? c?.config);
+        const instrumentConnection = (connection: unknown, config?: unknown, name?: unknown): void => {
+          const c = connection as
+            | { name?: unknown; client?: unknown; readClient?: unknown; config?: unknown }
+            | null
+            | undefined;
+          instrumentKnex(c?.client, config ?? c?.config, name ?? c?.name);
+          instrumentKnex(c?.readClient, config ?? c?.config, name ?? c?.name);
         };
         // As conexões já abertas...
         for (const node of database.manager.connections.values()) {
-          const n = node as { connection?: unknown; config?: unknown } | null | undefined;
-          instrumentConnection(n?.connection, n?.config);
+          const n = node as { name?: unknown; connection?: unknown; config?: unknown } | null | undefined;
+          instrumentConnection(n?.connection, n?.config, n?.name);
         }
         // ...e as que o Lucid abrir depois.
         const { emitter } = database as unknown as { emitter: LucidEmitter };

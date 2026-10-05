@@ -1,7 +1,12 @@
 import { randomBytes } from 'node:crypto';
 import type { FastifyInstance, FastifyPluginAsync, FastifyReply, FastifyRequest } from 'fastify';
 import type { StackTracePlugin } from '../core/plugins/types.js';
-import { getRequestSnapshot, runWithRequestContext, type HttpRequestSnapshot } from '../core/request-context.js';
+import {
+  getRequestSnapshot,
+  readRequestScopeIdentity,
+  runWithRequestContext,
+  type HttpRequestSnapshot,
+} from '../core/request-context.js';
 import { isTelemetryActive, safeRun } from '../core/safe-run.js';
 import { runWithTraceContext } from '../core/trace-span-context.js';
 import type { StackTraceClient } from '../core/stacktrace-client.js';
@@ -14,6 +19,7 @@ import { httpRootSpanOutcome } from './http-root-span-outcome.js';
 import { httpRootSpanRoute } from './http-root-span-route.js';
 import { httpRootSpanIdentity, withRootSpanAttributes, type HttpRootSpanIdentity } from './http-root-span-identity.js';
 import { completeLocalRoot, recordBoundaryError } from '../core/error-tracking.js';
+import { takeRootSpanAttributes } from '../core/root-span-attributes.js';
 import { warnRemovedCaptureErrors } from './removed-options.js';
 
 export type StacktracePluginOptions = {
@@ -35,6 +41,8 @@ type RootTraceCtx = {
   rootSpanId: string;
   parentSpanId: string | undefined;
   identity: HttpRootSpanIdentity | undefined;
+  /** O snapshot da requisição: o `close` roda fora do AsyncLocalStorage, e o leitor do escopo mora nele. */
+  snapshot: HttpRequestSnapshot;
 };
 
 type TracedRequest = FastifyRequest & {
@@ -69,6 +77,9 @@ function emitRootSpan(
     remoteParentSpanId: ctx.parentSpanId,
     statusCode: reply.statusCode,
   });
+  const appAttributes = takeRootSpanAttributes(ctx.traceId, ctx.rootSpanId, () =>
+    readRequestScopeIdentity(ctx.snapshot),
+  );
 
   if (client === null) return;
 
@@ -107,7 +118,7 @@ function emitRootSpan(
     ...httpRootSpanOutcome(aborted, reply.statusCode, boundaryError),
     http_method: request.method,
     http_route: routeFields.http_route,
-    ...withRootSpanAttributes(ctx.identity, routeFields.attributes),
+    ...withRootSpanAttributes(ctx.identity, routeFields.attributes, appAttributes),
   });
 }
 
@@ -151,7 +162,7 @@ function prepareRequest(request: FastifyRequest, client: StackTraceClient | null
     requestId: correlation.requestId,
     socketAddress: request.raw.socket?.remoteAddress,
   });
-  req[TRACE_CTX_KEY] = { traceId, rootSpanId, parentSpanId: correlation.parentSpanId, identity };
+  req[TRACE_CTX_KEY] = { traceId, rootSpanId, parentSpanId: correlation.parentSpanId, identity, snapshot };
   return { snapshot, traceId, rootSpanId, parentSpanId: correlation.parentSpanId, traceFlags: correlation.traceFlags };
 }
 

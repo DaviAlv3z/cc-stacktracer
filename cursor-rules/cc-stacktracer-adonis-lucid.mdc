@@ -1,6 +1,6 @@
 ---
 alwaysApply: false
-version: 0.6.0
+version: 0.7.0
 lastUpdated: 2026-10-05
 ruleset: cc-stacktracer-adonis-lucid
 extends: cc-stacktracer-core.mdc
@@ -128,7 +128,13 @@ Recommended span fields:
 **Outbound (distributed tracing, opt-in):** to make this service's outbound HTTP
 calls join the same trace, enable `StackTrace.auto({ outboundHttp: { instrumentNodeHttp: true, instrumentFetch: true } })`.
 `instrumentNodeHttp` covers axios/got/follow-redirects on Node. See core rules §8 and
-`docs/client-distributed-tracing.md`.
+`docs/client-distributed-tracing.md`. SDK 3.4: ids in the outbound path are masked (`/pessoas/:id`);
+`routeTemplate` sets a route the masking does not catch; `propagateTraceparent: 'internal'` keeps
+`traceparent` away from third-party APIs.
+
+Register static, Vite and CORS middleware BEFORE the SDK middleware in `server.use`: they answer without
+reaching the router (static files, the OPTIONS preflight), and in front of them every such request becomes an
+`[unmatched]` root span.
 
 Use capture policy checks when available before enqueuing request telemetry.
 
@@ -169,11 +175,15 @@ from the driver. Add `app.terminating(() => StackTrace.shutdown())` there so the
 is queued. Up to 3.2 the Lucid wiring silently instrumented nothing — if an app on 3.2 or earlier shows no DB
 spans, upgrade before debugging.
 
-Use one of:
+SDK 3.4: `auto({ lucid: db, lucidOptions: { statement: true, parameters: 'masked' } })` also sends the SQL with
+placeholders (`db_statement`) and the masked bindings (`db_parameters`), and every DB span carries
+`db.namespace`, `db.connection` and, on failure, `db.error.*` (SQLSTATE, constraint, driver code). On each Lucid
+connection set `compileSqlOnError: false` (knex otherwise puts the SQL WITH values in the error message) and
+`asyncStackTraces: true` (otherwise a pg error's stack has no app frame).
 
-- repository/service-level `runQuery` wrappers for critical operations
-- centralized Lucid/Database query instrumentation when the app version supports it reliably
-- a hybrid: centralized coverage for common operations plus explicit wrappers for business-critical flows
+**Never wrap a Lucid query in `runQuery` or `measure({ kind: 'db' })`**: with the plugin on, that is a second
+`db` span for the same query, counted twice in the bottlenecks. To name a business operation made of queries,
+use `withSpan(name, fn, { type: 'business' })`. `runQuery` is only for databases outside Lucid.
 
 Naming:
 
@@ -207,19 +217,19 @@ All raw SQL must be parameterized.
 Rules:
 
 - prefer bindings over interpolation
-- wrap important raw SQL in `runQuery`
+- raw SQL through Lucid (`db.rawQuery`) is already measured by the plugin — do not wrap it in `runQuery`
 - extract table and SQL verb when possible
-- do not send full SQL text in telemetry; emit only table/object, operation, duration, status, and sanitized error metadata
+- never send SQL with values: the only SQL in telemetry is the plugin's `db_statement` (placeholders), from bindings
 - ban unsafe raw execution with untrusted input
 
-Recommended wrapper shape:
+Recommended wrapper shape for a database OUTSIDE Lucid (a pool of your own):
 
 ```ts
 await StackTrace.runQuery(
   'postgres',
   'reports.monthlyPayroll',
   () => {
-    return db.rawQuery(sqlText, bindings);
+    return pool.query(sqlText, bindings);
   },
   {
     table: 'payroll',
@@ -310,6 +320,12 @@ await next();
 
 On 2.1.x and earlier the scope was process-global and the `try/finally` with `clearUser()` was
 mandatory. Upgrade rather than keeping the workaround.
+
+**SDK 3.4:** with `init({ identityOnSpans: true })`, the `user.id` from `setUser` and the `subtenant` tag from
+`setTags` also go on the spans — the request's root span (read when it ends) and every span started after the
+marking. `withTrace` opens its own scope, so a job's `setUser`/`setTags` stay in the job. Outside a request
+or `withTrace` the scope is process-wide: never mark a user or a customer there. Other root span attributes:
+`StackTrace.setRootSpanAttributes({ ... })`.
 
 ### Subtenant — one app, many customers
 
@@ -432,7 +448,7 @@ Verify before considering an Adonis/Lucid integration complete:
 - DB/business/external spans have `parent_span_id` during requests
 - exception handler `report()` calls `StackTrace.recordRequestError(error)`
 - a thrown 5xx shows up as one error event and a root span with `error_type`
-- Lucid or repository DB operations wrapped with `runQuery`
+- each DB operation measured once — by the Lucid plugin (no `runQuery` around Lucid queries)
 - raw SQL parameterized and instrumented
 - user context set after auth and cleared after response
 - business spans cover expensive non-DB work

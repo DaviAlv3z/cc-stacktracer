@@ -18,4 +18,4 @@ const env = {
 execFileSync(process.execPath, ['ace', 'build'], { stdio: 'inherit', env: { ...process.env, ...env, PORT: '3333' } });
 symlinkSync('../node_modules', 'build/node_modules', 'junction');
 mkdirSync('build/tmp', { recursive: true }); // o SQLite do kit mora em app.tmpPath()
-await runAppSmoke({ name: 'app-adonis7-sqlite', cwd: 'build', command: [process.execPath, 'bin/server.js'], env, expectDbSpans: 30, dbSystem: 'sqlite' });
+await runAppSmoke({ name: 'app-adonis7-sqlite', cwd: 'build', command: [process.execPath, 'bin/server.js'], env, expectDbSpans: 30, dbSystem: 'sqlite', identityOnSpans: true, dbStatement: true });

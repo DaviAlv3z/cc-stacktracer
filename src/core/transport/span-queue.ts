@@ -174,6 +174,11 @@ export class SpanQueue {
         'spanqueue_flush_rerun_requested',
       );
       await this.activeFlush;
+      // O flush ativo pode ter terminado ANTES de ver o pedido acima (ver EventQueue.runFlush): até a 3.3.0 este
+      // caminho voltava sem enviar, e o `shutdown()` descartava a fila.
+      if (this.hasWorkFor(drainAll)) {
+        await this.runFlush(drainAll);
+      }
       return;
     }
 
@@ -187,6 +192,11 @@ export class SpanQueue {
         this.activeFlush = null;
       }
     }
+  }
+
+  /** Ainda há o que este pedido de flush entrega: tudo (drain) ou um lote cheio. */
+  private hasWorkFor(drainAll: boolean): boolean {
+    return drainAll ? this.queue.length > 0 : this.queue.length >= this.options.maxBatchSize;
   }
 
   private async runFlushLoop(drainAll: boolean, flushId: number): Promise<void> {

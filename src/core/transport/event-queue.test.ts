@@ -233,3 +233,31 @@ describe('EventQueue fail-open', () => {
     vi.useRealTimers();
   });
 });
+
+describe('EventQueue — flushPending logo depois de enfileirar', () => {
+  const microtasks = async (n: number): Promise<void> => {
+    for (let i = 0; i < n; i += 1) await Promise.resolve();
+  };
+
+  // Até a 3.3.0: um flush de fundo (do `enqueue`) que já tinha terminado, mas ainda não tinha sido limpo,
+  // fazia o `flushPending` esperar por ele e voltar sem enviar — e o `shutdown()` descartava a fila.
+  it('entrega tudo, qualquer que seja o intervalo entre os enqueues e o flush', async () => {
+    const falhas: string[] = [];
+    for (let gapA = 0; gapA <= 6; gapA += 1) {
+      for (let gapB = 0; gapB <= 4; gapB += 1) {
+        const deliver = vi.fn<(batch: LogEvent[]) => Promise<void>>().mockResolvedValue(undefined);
+        const q = new EventQueue({ sendMode: 'batch', maxBatchSize: 50, flushIntervalMs: 60_000, deliver });
+        q.enqueue(logEvent('a'));
+        await microtasks(gapA);
+        q.enqueue(logEvent('b'));
+        await microtasks(gapB);
+        await q.flushPending({ ignoreBackoff: true });
+        const entregues = deliver.mock.calls.flatMap(([batch]) => batch.map((e) => e.message));
+        if (entregues.join(',') !== 'a,b' || q.pendingCount() !== 0)
+          falhas.push(`${gapA},${gapB}: ${entregues.join(',')}`);
+        q.stop();
+      }
+    }
+    expect(falhas).toEqual([]);
+  });
+});

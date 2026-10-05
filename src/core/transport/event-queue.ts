@@ -153,6 +153,12 @@ export class EventQueue {
       this.rerunRequested = true;
       this.drainAllRequested = this.drainAllRequested || drainAll;
       await this.activeFlush;
+      // O flush ativo pode ter terminado ANTES de ver o pedido acima: ele só olha `rerunRequested` entre uma volta
+      // e outra, e o `finally` que o limpa roda depois. Até a 3.3.0 este caminho voltava sem enviar — um `flush()`
+      // logo depois de um enqueue não drenava nada, e o `shutdown()` descartava a fila.
+      if (this.hasWorkFor(drainAll)) {
+        await this.runFlush(drainAll);
+      }
       return;
     }
 
@@ -165,6 +171,11 @@ export class EventQueue {
         this.activeFlush = null;
       }
     }
+  }
+
+  /** Ainda há o que este pedido de flush entrega: tudo (drain) ou um lote cheio. */
+  private hasWorkFor(drainAll: boolean): boolean {
+    return drainAll ? this.queue.length > 0 : this.queue.length >= this.options.maxBatchSize;
   }
 
   private async runFlushLoop(drainAll: boolean): Promise<void> {

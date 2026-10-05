@@ -88,11 +88,15 @@ export function httpRootSpanIdentity(input: HttpRootSpanIdentityInput): HttpRoot
   return safeRun('httpRootSpan.identity', () => computeIdentity(input));
 }
 
-/** `attributes` do span raiz: a identidade mais o `url.path` do balde `[unmatched]`, sem perder nenhum. */
+/**
+ * `attributes` do span raiz: os da app (`setRootSpanAttributes`, `identityOnSpans`) por baixo, a identidade da
+ * requisição e o `url.path` do balde `[unmatched]` por cima — a app não sobrescreve o que o SDK mede.
+ */
 export function withRootSpanAttributes(
   identity: HttpRootSpanIdentity | undefined,
   routeAttributes: Record<string, unknown> | undefined,
+  appAttributes?: Record<string, unknown>,
 ): { attributes?: Record<string, unknown> } {
-  if (identity === undefined && routeAttributes === undefined) return {};
-  return { attributes: { ...identity, ...routeAttributes } };
+  if (identity === undefined && routeAttributes === undefined && appAttributes === undefined) return {};
+  return { attributes: { ...appAttributes, ...identity, ...routeAttributes } };
 }

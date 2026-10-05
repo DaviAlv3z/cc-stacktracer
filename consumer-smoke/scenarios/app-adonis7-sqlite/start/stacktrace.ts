@@ -17,7 +17,9 @@ await StackTrace.auto({
   serviceId: process.env.STACKTRACE_SERVICE_ID!,
   endpoint: process.env.STACKTRACE_ENDPOINT!,
   enableGlobalHandlers: true,
+  identityOnSpans: true,
   lucid: db,
+  lucidOptions: { statement: true, parameters: 'masked' },
 })
 
 // SIGTERM (deploy, `docker stop`): o Adonis encerra a app e o SDK envia o que ainda está na fila.

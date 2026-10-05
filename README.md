@@ -150,16 +150,17 @@ Using Cursor? Copy `node_modules/cc-stacktracer/cursor-rules/*.mdc` into your pr
 | `logStructured({ level, message, attributes })` | Structured log |
 | `captureException(error, context?)` | Error event for an error you handle yourself (the rest are automatic) |
 | `recordRequestError(error)` | In a framework error handler the integration cannot see (AdonisJS `report()`): one event only if the response is a 5xx |
-| `runQuery(system, name, fn, options?)` | Timed DB span |
+| `runQuery(system, name, fn, options?)` | Timed DB span, for a database no plugin instruments (never around a Lucid or Prisma query: that is two spans) |
 | `measure(name, fn, options?)` | Timed span for arbitrary work |
 | `withSpan(name, fn, options?)` | Manual span |
-| `withTrace(name, fn, options?)` | Root span for a job, consumer, cron or CLI |
+| `withTrace(name, fn, options?)` | Root span — and its own `setUser`/`setTags` scope — for a job, consumer, cron or CLI |
 | `withBusinessContext(ctx, fn)` | Scope `entity`/`operation` onto spans and events |
-| `setUser(user)` / `tag(key, value)` | Scope metadata |
+| `setUser(user)` / `setTags(tags)` / `tag(key, value)` | Scope metadata; with `init({ identityOnSpans: true })`, `user.id` and the `subtenant` tag also go on spans |
+| `setRootSpanAttributes(attributes)` | Attributes on the root span of the current request or `withTrace` |
 | `flush()` / `shutdown()` | Drain the queue on graceful shutdown |
 
-Every function in this table is available both on the `StackTrace` object and as a named export,
-except `withTrace`, which is a named export only (`import { withTrace } from 'cc-stacktracer'`).
+Every function in this table is available both on the `StackTrace` object and as a named export (since 3.4,
+`withTrace` too).
 
 ---
 

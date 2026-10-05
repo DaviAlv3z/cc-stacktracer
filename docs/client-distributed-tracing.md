@@ -74,11 +74,13 @@ StackTrace.instrumentFetch();
 
 | Option | Default | Meaning |
 |---|---|---|
-| `propagateTraceparent` | `true` | Inject `traceparent` into outbound requests. |
+| `propagateTraceparent` | `true` | Inject `traceparent` into outbound requests. `'internal'` (3.4): only into calls classified as internal — third-party APIs do not receive it. |
 | `internalServiceMap` | – | `host` (or `host:port`) → logical internal service name. Classifies the call as internal. |
 | `serviceNameResolver` | – | `(url) => string \| undefined`; non-empty return ⇒ internal service. |
 | `ignoreUrls` | – | Skip these (substring/host for strings, `test()` for RegExp). |
 | `allowUrls` | – | When set, **only** these are instrumented. |
+| `routeTemplate` | – | (3.4) `(url, method) => '/v1/people/:id'`: the path template for `http_route`. Without it, ids in the path are masked. |
+| `attributes` | – | (3.4) `(url, method) => ({ ... })`: extra span attributes, read when the call starts, in the caller's context. The SDK's own attributes win. |
 
 ## 4) What gets recorded
 
@@ -86,6 +88,10 @@ Each outbound call emits a client span with `span_type: 'external'` and attribut
 
 - `http_method`, `http_route` (host + path, **no query string**), `http_status_code`, duration, status
   (`error` on network failure or HTTP ≥ 500).
+- Since 3.4 the path in `http_route` has its identifiers masked — numbers, UUID/ObjectId/ULID, CPF/CNPJ and other
+  formatted numbers, e-mail addresses, long tokens become `:id` (`api.example.com/v1/people/12345678900` →
+  `api.example.com/v1/people/:id`). Until 3.3 the path went raw: one route row per record, with the identifier
+  in it. For a path the masking does not catch, set `routeTemplate`.
 - `peer.kind` = `internal_service` | `external_api`; `peer.service` (when classified internal).
 
 DB spans (Lucid / Prisma plugins) and business spans nest under the request automatically.

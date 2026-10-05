@@ -1,6 +1,6 @@
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { getBusinessContext } from './business-context.js';
-import { getScopeContextForMerge, runWithScope } from './scope-metadata.js';
+import { captureScopeIdentityReader, getScopeContextForMerge, runWithScope } from './scope-metadata.js';
 import { extractCorrelationFromHeaders, hasCorrelationData } from '../utils/correlation.js';
 import { getTraceSpanState } from './trace-span-context.js';
 
@@ -27,6 +27,17 @@ function resolveRoute(snap: HttpRequestSnapshot): string | undefined {
 const storage = new AsyncLocalStorage<HttpRequestSnapshot>();
 
 /**
+ * O leitor da identidade do escopo de cada requisição, ao lado do snapshot e não dentro dele (o snapshot pode ser
+ * de quem chamou). O span raiz sai no `finish` da resposta, que pode rodar fora do AsyncLocalStorage.
+ */
+const scopeReaders = new WeakMap<HttpRequestSnapshot, () => Record<string, string> | undefined>();
+
+/** `user.id`/`subtenant` do escopo da requisição deste snapshot, lidos agora (`identityOnSpans`). */
+export function readRequestScopeIdentity(snapshot: HttpRequestSnapshot): Record<string, string> | undefined {
+  return scopeReaders.get(snapshot)?.();
+}
+
+/**
  * Abre o contexto de requisição — o snapshot HTTP E o escopo de `setUser`/`tag`.
  *
  * As duas coisas viajam juntas de propósito. Elas têm exatamente o mesmo tempo de vida (uma
@@ -36,11 +47,21 @@ const storage = new AsyncLocalStorage<HttpRequestSnapshot>();
  * aparecer ganha o isolamento sem precisar lembrar de pedi-lo.
  */
 export function runWithRequestContext<T>(snapshot: HttpRequestSnapshot, fn: () => T): T {
-  return storage.run(snapshot, () => runWithScope(fn));
+  return storage.run(snapshot, () =>
+    runWithScope(() => {
+      scopeReaders.set(snapshot, captureScopeIdentityReader());
+      return fn();
+    }),
+  );
 }
 
 export function runWithRequestContextAsync<T>(snapshot: HttpRequestSnapshot, fn: () => Promise<T>): Promise<T> {
-  return storage.run(snapshot, () => runWithScope(fn));
+  return storage.run(snapshot, () =>
+    runWithScope(() => {
+      scopeReaders.set(snapshot, captureScopeIdentityReader());
+      return fn();
+    }),
+  );
 }
 
 export function getRequestSnapshot(): HttpRequestSnapshot | undefined {

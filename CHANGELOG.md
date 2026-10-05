@@ -4,6 +4,120 @@ All notable changes to the `cc-stacktracer` SDK are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.4.0] - 2026-10-05
+
+Two fixes for data that 3.3.0 could lose or attribute to the wrong user, and the APIs that put the user, the
+customer (`subtenant`), the SQL and the driver's error on the spans — without instrumentation of your own.
+
+### Fixed
+
+- **`flush()` and `shutdown()` could return without sending the queue.** Called a few microtasks after two
+  items were queued — the deploy's SIGTERM right after a request ended, a crash right after a log — the queue
+  waited on a background flush that had already finished, and returned. `shutdown()` then discarded the client
+  with the events still in it, and the `[cc-stacktracer] ... lost` warning followed. Both queues (events and
+  spans) now flush again when work is left. Reproduced deterministically on 3.3.0; the regression test runs 35
+  timings against each queue.
+- **A job's `setUser`/`setTags` leaked into the requests that followed.** `withTrace` had no scope of its own:
+  what a job marked went to the process-wide scope, and every later request — anonymous ones included — went
+  out with the job's user and `subtenant`. `withTrace` now opens its own scope, like a request, and a new
+  request or job no longer inherits the user from the process-wide scope. Tags set at boot (outside any request
+  or job) still apply to everything, as documented.
+- **The AdonisJS guide told you to also wrap Lucid queries in `runQuery`.** With the Lucid plugin on, that is a
+  second `db` span for the same query, and the dashboard counts it twice in the bottlenecks. The guides now say
+  to name a group of queries with `withSpan(name, fn, { type: 'business' })`, and to keep `runQuery` for
+  databases the plugins do not instrument.
+
+### Added
+
+- **`init({ identityOnSpans: true })`** (off by default). The `id` from `setUser` goes on the spans as `user.id`,
+  and the `subtenant` tag (`setTags({ subtenant })`) as `subtenant`: on every span started after the scope knows
+  them (database, outbound, `withSpan`, `runQuery`) and on the root span of the request or `withTrace`, which is
+  read when it ends. Set the user and the customer once, after authentication, and every authenticated trace can
+  be filtered by `subtenant` — until 3.3 the root span could not carry it, and apps emitted an extra span just
+  for that. Queries that run before authentication (the auth's own) do not carry them.
+- **`setRootSpanAttributes(attributes)`** (also `StackTrace.setRootSpanAttributes`): adds attributes to the root
+  span of the current request or `withTrace`, from anywhere inside it. Later calls merge, `undefined` removes a
+  key. It does not overwrite span columns (`http_*`, `db_*`) or the identity the SDK records (`host.name`,
+  `client.address`…). Returns `false` outside a request or job, or after the root span ended.
+- **Lucid: `statement`, `parameters` and `attributes`**, in `createLucidStackTracePlugin(db, options)` and
+  `auto({ lucid: db, lucidOptions })`:
+  - `statement: true` sends the SQL as knex runs it — with placeholders (`$1`, `?`), never the values, as long as
+    the app uses bindings — in `db_statement`, up to 4,000 characters. The dashboard shows it in the span's
+    Statement section.
+  - `parameters: 'masked'` sends the bindings in `db_parameters`: numbers, booleans, `null` and UUIDs as they are,
+    text as `[string:<length>]`, dates as `[date]`, buffers as `[binary:<length>]`, at most 50.
+    `parameters: 'types'` masks numbers too (for schemas that store a CPF or a phone number as a number).
+  - `attributes: () => ({ ... })` adds attributes to every DB span, read when the query starts, in the caller's
+    context. The SDK's own attributes win.
+  - All three are off by default.
+- **DB spans from the Lucid plugin carry `db.namespace`** (the database name) **and `db.connection`** (the Lucid
+  connection name) — with several connections, or a database per tenant, they say which one. Never the host,
+  user or password.
+- **The driver's error, on the span and on the event.** A failed query's span carries `db.error.kind`
+  (`constraint`, `connection`, `timeout`, `deadlock`, `syntax_or_schema`, `other`), `db.error.code` (SQLSTATE
+  `23505`, `ER_DUP_ENTRY`, `SQLITE_CONSTRAINT_UNIQUE`…), `db.error.constraint`, `db.error.table`,
+  `db.error.sqlstate`, `db.error.errno`, `db.error.number` and the rest the driver gives — never pg's `detail`
+  or SQL Server's `originalError`, which carry values. Error events carry the same fields as tags, from any
+  capture path; an error that is not from a driver carries `error.code` (`E_ROW_NOT_FOUND`, `P2002`,
+  `ECONNREFUSED`) and `error.cause.type`. Until 3.3 the event had only `name`, `message` and `stack`, and pg's
+  `name` is `"error"`.
+- **Outbound HTTP**: `routeTemplate: (url, method) => '/v1/pessoas/:cpf'` sets the route of the call;
+  `attributes: (url, method) => ({ ... })` adds attributes to its span, read when the call starts, in the
+  caller's context; `propagateTraceparent: 'internal'` sends `traceparent` only to the services in
+  `internalServiceMap` / `serviceNameResolver` — third-party APIs do not receive it.
+- **`StackTrace.withTrace`, `StackTrace.beginOutboundSpan` and `StackTrace.endOutboundSpan`.** They were named
+  exports only, and `StackTrace.withTrace` was `undefined`.
+
+### Changed
+
+- **The `http_route` of an outbound call no longer carries identifiers.** Path segments that look like one —
+  numbers, UUID/ObjectId/ULID, CPF, CNPJ and other formatted numbers, e-mail addresses, long tokens — become
+  `:id`: `api.example.com/v1/pessoas/12345678900` is now `api.example.com/v1/pessoas/:id`. Until 3.3 every
+  person was a route row, with the identifier in it. The external-call rows in the dashboard regroup after the
+  upgrade. For a path the masking does not catch (a name, a slug), use `routeTemplate`.
+- DB spans from the Lucid plugin carry `db.namespace` and `db.connection` (see Added).
+
+### Tested with (on the packed package, inside clean projects and real apps, in containers)
+
+The same matrix as 3.3.0 — Node.js 20, 22, 24 and 26 · TypeScript 5.5 to 7.0 · Express 4.16+ and 5 · Fastify 4
+and 5 · AdonisJS 6 and 7 with Lucid 20 to 22 (PostgreSQL, MySQL, SQL Server, SQLite) · NestJS 10, 11 and 12 ·
+Prisma 5, 6 and 7 — plus:
+
+- `flush-after-enqueue` and `job-scope-isolation`, which reproduce the two fixes: both fail on the published
+  3.3.0 and pass on 3.4.0.
+- The Lucid scenarios assert, against real PostgreSQL, MySQL and SQL Server, the SQL with placeholders, the masked
+  bindings, `db.namespace`/`db.connection` and the driver's error code (`42P01`, `ER_NO_SUCH_TABLE`, `208`), and
+  that a bound value never reaches a span.
+- The Express, Fastify and AdonisJS scenarios turn on `identityOnSpans`: each of 30 concurrent requests' root
+  span carries its own `user.id`, including when the root span is emitted on the response's `finish`.
+
+### Upgrading from 3.3
+
+Everyone on 3.3.0 should upgrade: the two fixes are about lost telemetry and telemetry attributed to the wrong
+user.
+
+1. `npm install --save-exact cc-stacktracer@3.4.0`. Nothing else is required.
+2. **If you worked around the flush bug** with `await new Promise((r) => setImmediate(r))` before
+   `StackTrace.shutdown()`, you can remove it.
+3. **Jobs, crons, queue consumers**: run each one inside `withTrace` — that is what gives it its own scope. A
+   `setUser` or `setTags` outside any request or `withTrace` still goes to the process-wide scope, and its tags
+   apply to everything the process sends: never mark a user or a customer there. If your app relied on a
+   `setUser` made at boot being inherited by requests, set the user per request.
+4. **AdonisJS + Lucid**: remove `StackTrace.runQuery` around Lucid queries — each one is being measured twice.
+   To name a business operation, use `withSpan('relatorio.mensal', fn, { type: 'business' })`.
+5. **Workarounds you can delete**, if you wrote them: a span emitted only to carry `subtenant` or the user
+   (`identityOnSpans`); knex listeners of your own to put SQL on DB spans (`lucidOptions`); a wrapper around
+   outbound calls to template the route (now masked, or `routeTemplate`); copying driver error fields to tags in
+   the exception handler (now automatic).
+6. **Dashboards, saved filters and alerts** on a raw outbound route (`host/users/123`) need the masked one
+   (`host/users/:id`).
+7. **Recommended for logged-in, multi-tenant apps**: `init({ identityOnSpans: true })`, then `setUser({ id })`
+   and `setTags({ subtenant })` right after authentication; `auto({ lucid: db, lucidOptions: { statement: true,
+   parameters: 'masked' } })`; and `outboundHttp: { propagateTraceparent: 'internal' }` when the app calls
+   third-party APIs. On AdonisJS, also set `compileSqlOnError: false` and `asyncStackTraces: true` on each Lucid
+   connection: knex puts the SQL WITH the values in the error message by default (on MySQL and SQLite), and
+   without async stack traces a pg error's stack has no frame of your code. See the AdonisJS guide.
+
 ## [3.3.0] - 2026-10-05
 
 What the SDK promises now holds in the apps that use it: jobs deliver without `shutdown()`, Lucid and
