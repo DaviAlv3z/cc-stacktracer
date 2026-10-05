@@ -1,7 +1,7 @@
 ---
 alwaysApply: false
 version: 0.5.0
-lastUpdated: 2026-10-03
+lastUpdated: 2026-10-05
 ruleset: cc-stacktracer-fastify-prisma
 extends: cc-stacktracer-core.mdc
 ---

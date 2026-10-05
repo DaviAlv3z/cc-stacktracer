@@ -1,7 +1,7 @@
 ---
 alwaysApply: false
 version: 0.6.0
-lastUpdated: 2026-10-03
+lastUpdated: 2026-10-05
 ruleset: cc-stacktracer-adonis-lucid
 extends: cc-stacktracer-core.mdc
 ---
